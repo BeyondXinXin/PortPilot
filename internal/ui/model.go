@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"fmt"
-
 	"github.com/BeyondXinXin/portpilot/internal/config"
 	"github.com/BeyondXinXin/portpilot/internal/manager"
 	"github.com/lxn/walk"
@@ -37,13 +35,7 @@ func (m *serviceTableModel) Value(row, column int) any {
 	case 4:
 		return item.PublicURL
 	case 5:
-		if item.TunnelPort != 0 {
-			return fmt.Sprintf("正常 (%d)", item.TunnelPort)
-		}
-		if item.Status == manager.StatusError {
-			return "异常"
-		}
-		return "-"
+		return manager.AccessModeLabel(item.AccessMode)
 	default:
 		return ""
 	}

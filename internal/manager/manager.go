@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/BeyondXinXin/portpilot/internal/config"
+	"github.com/BeyondXinXin/portpilot/internal/direct"
 	"github.com/BeyondXinXin/portpilot/internal/localserver"
+	"github.com/BeyondXinXin/portpilot/internal/networkinfo"
 	"github.com/BeyondXinXin/portpilot/internal/portcheck"
 	"github.com/BeyondXinXin/portpilot/internal/runlog"
 	"github.com/BeyondXinXin/portpilot/internal/tunnel"
@@ -27,12 +30,14 @@ const (
 )
 
 type Snapshot struct {
-	Service    config.Service
-	Status     Status
-	PublicURL  string
-	TunnelPort int
-	LastError  string
-	PortOwner  portcheck.Info
+	Service        config.Service
+	Status         Status
+	PublicURL      string
+	AccessMode     config.AccessMode
+	NetworkWarning string
+	TunnelPort     int
+	LastError      string
+	PortOwner      portcheck.Info
 }
 
 type ConflictError struct {
@@ -48,14 +53,17 @@ func (e *ConflictError) Error() string {
 }
 
 type runtime struct {
-	opMu        sync.Mutex
-	service     config.Service
-	status      Status
-	publicURL   string
-	tunnelPort  int
-	lastError   string
-	portOwner   portcheck.Info
-	localServer *localserver.Server
+	opMu           sync.Mutex
+	service        config.Service
+	status         Status
+	publicURL      string
+	tunnelPort     int
+	lastError      string
+	portOwner      portcheck.Info
+	localServer    *localserver.Server
+	directServer   *direct.Server
+	accessMode     config.AccessMode
+	networkWarning string
 }
 
 type Manager struct {
@@ -66,7 +74,10 @@ type Manager struct {
 	logger      *runlog.Logger
 	subscribers map[chan Snapshot]struct{}
 	closing     atomic.Bool
+	funnelUsed  atomic.Bool
 	recovering  sync.Map
+	networkInfo networkinfo.Info
+	networkErr  error
 }
 
 type tunnelController interface {
@@ -83,6 +94,8 @@ func New(services []config.Service, tunnelManager tunnelController, logger *runl
 		logger:      logger,
 		subscribers: make(map[chan Snapshot]struct{}),
 	}
+	manager.networkInfo, manager.networkErr = networkinfo.Detect()
+	manager.logNetworkInfo()
 	_ = manager.SetServices(services)
 	return manager
 }
@@ -145,9 +158,14 @@ func (m *Manager) SetServices(services []config.Service) error {
 				return fmt.Errorf("服务 %s 正在运行，停止后才能修改", state.service.Name)
 			}
 			state.service = service
+			if state.status == StatusStopped {
+				m.applyCandidateLocked(state)
+			}
 			continue
 		}
-		m.runtimes[service.ID] = &runtime{service: service, status: StatusStopped}
+		state := &runtime{service: service, status: StatusStopped}
+		m.applyCandidateLocked(state)
+		m.runtimes[service.ID] = state
 	}
 	for id, state := range m.runtimes {
 		if _, exists := newIDs[id]; exists {
@@ -228,8 +246,8 @@ func (m *Manager) Start(id string) error {
 		}
 	}
 
-	m.logger.Servicef(id, "建立 Tailscale Funnel")
-	assignment, err := m.tunnel.Start(id, service.LocalAddress)
+	m.refreshNetwork()
+	access, err := m.startAccess(id, service)
 	if err != nil {
 		if local != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -241,14 +259,117 @@ func (m *Manager) Start(id string) error {
 
 	m.mu.Lock()
 	state.localServer = local
-	state.publicURL = assignment.PublicURL
-	state.tunnelPort = assignment.HTTPSPort
+	state.directServer = access.directServer
+	state.publicURL = access.url
+	state.accessMode = access.mode
+	state.networkWarning = access.warning
+	state.tunnelPort = access.tunnelPort
 	state.status = StatusRunning
 	state.portOwner = portcheck.Info{}
 	m.mu.Unlock()
-	m.logger.Servicef(id, "服务运行成功: %s", assignment.PublicURL)
+	m.logger.Servicef(id, "服务运行成功: %s (%s)", access.url, AccessModeLabel(access.mode))
+	if access.warning != "" {
+		m.logger.Servicef(id, "网络警告: %s", access.warning)
+	}
 	m.emit(id)
 	return nil
+}
+
+type accessStart struct {
+	mode         config.AccessMode
+	url          string
+	warning      string
+	tunnelPort   int
+	directServer *direct.Server
+}
+
+func (m *Manager) startAccess(serviceID string, service config.Service) (accessStart, error) {
+	m.mu.RLock()
+	networkState := m.networkInfo
+	networkErr := m.networkErr
+	m.mu.RUnlock()
+	mode, address, available := selectAccessMode(service.AccessMode, networkState)
+	if !available {
+		if networkErr != nil {
+			return accessStart{}, networkErr
+		}
+		switch service.AccessMode {
+		case config.AccessIPv6Direct:
+			return accessStart{}, errors.New("未检测到可用的公网 IPv6 地址")
+		case config.AccessTailscaleDirect:
+			return accessStart{}, errors.New("未检测到 Tailscale 100.x 地址")
+		default:
+			return accessStart{}, errors.New("没有可用的访问模式")
+		}
+	}
+
+	switch mode {
+	case config.AccessIPv6Direct, config.AccessTailscaleDirect:
+		accessURL := directURL(address.IP, service.Port)
+		m.logger.Servicef(serviceID, "Network Mode: %s selected", AccessModeLabel(mode))
+		m.logger.Servicef(serviceID, "Address: %s", address.IP.String())
+		m.logger.Servicef(serviceID, "Port: %d", service.Port)
+		m.logger.Servicef(serviceID, "Target: %s", service.LocalAddress)
+		directServer, err := direct.Start(address.IP, service.Port, service.LocalAddress)
+		if err != nil {
+			return accessStart{}, err
+		}
+		warning := directWarning(mode, service.Port)
+		return accessStart{mode: mode, url: accessURL, warning: warning, directServer: directServer}, nil
+	default:
+		if service.AccessMode == config.AccessAuto {
+			m.logger.Servicef(serviceID, "Fallback: Tailscale Funnel")
+		}
+		m.logger.Servicef(serviceID, "Network Mode: Tailscale Funnel selected")
+		assignment, err := m.tunnel.Start(serviceID, service.LocalAddress)
+		if err != nil {
+			return accessStart{}, err
+		}
+		m.funnelUsed.Store(true)
+		return accessStart{mode: config.AccessFunnel, url: assignment.PublicURL, tunnelPort: assignment.HTTPSPort}, nil
+	}
+}
+
+func selectAccessMode(requested config.AccessMode, info networkinfo.Info) (config.AccessMode, networkinfo.Address, bool) {
+	if requested == "" {
+		requested = config.AccessAuto
+	}
+	switch requested {
+	case config.AccessIPv6Direct:
+		address, ok := info.PrimaryIPv6()
+		return config.AccessIPv6Direct, address, ok
+	case config.AccessTailscaleDirect:
+		address, ok := info.PrimaryTailscale()
+		return config.AccessTailscaleDirect, address, ok
+	case config.AccessFunnel:
+		return config.AccessFunnel, networkinfo.Address{}, true
+	default:
+		if address, ok := info.PrimaryIPv6(); ok {
+			return config.AccessIPv6Direct, address, true
+		}
+		if address, ok := info.PrimaryTailscale(); ok {
+			return config.AccessTailscaleDirect, address, true
+		}
+		return config.AccessFunnel, networkinfo.Address{}, true
+	}
+}
+
+func directURL(ip net.IP, port int) string {
+	return "http://" + net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
+}
+
+func directWarning(mode config.AccessMode, port int) string {
+	status, err := networkinfo.CheckInboundTCP(port)
+	if mode == config.AccessIPv6Direct {
+		if err != nil || status != networkinfo.FirewallAllowed {
+			return "IPv6 地址存在，但入站访问可能被 Windows 防火墙或路由器阻止"
+		}
+		return "IPv6 Direct 已监听；仍需确认路由器 IPv6 入站防火墙允许该端口"
+	}
+	if err != nil || status != networkinfo.FirewallAllowed {
+		return "Tailscale 地址存在，但 Windows 防火墙可能阻止入站访问；连接会优先直连，受限时仍可能使用 DERP"
+	}
+	return "Tailscale 会优先点对点直连；网络受限时仍可能使用 DERP"
 }
 
 func (m *Manager) Stop(id string) error {
@@ -267,16 +388,27 @@ func (m *Manager) Stop(id string) error {
 	state.status = StatusStopping
 	service := state.service
 	local := state.localServer
+	directServer := state.directServer
+	accessMode := state.accessMode
 	m.mu.Unlock()
 	m.emit(id)
 	m.logger.Servicef(id, "停止服务 %s", service.Name)
 
 	var failures []error
-	if err := m.tunnel.Stop(id); err != nil {
-		failures = append(failures, fmt.Errorf("关闭 Funnel: %w", err))
-		m.logger.Servicef(id, "关闭 Funnel 失败: %v", err)
-	} else {
-		m.logger.Servicef(id, "Funnel 已关闭")
+	if accessMode == config.AccessFunnel {
+		if err := m.tunnel.Stop(id); err != nil {
+			failures = append(failures, fmt.Errorf("关闭 Funnel: %w", err))
+			m.logger.Servicef(id, "关闭 Funnel 失败: %v", err)
+		} else {
+			m.logger.Servicef(id, "Funnel 已关闭")
+		}
+	}
+	if directServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := directServer.Stop(ctx); err != nil {
+			failures = append(failures, err)
+		}
+		cancel()
 	}
 	if local != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -288,12 +420,14 @@ func (m *Manager) Stop(id string) error {
 
 	m.mu.Lock()
 	state.localServer = nil
-	state.publicURL = ""
+	state.directServer = nil
+	state.networkWarning = ""
 	state.tunnelPort = 0
 	state.portOwner = portcheck.Info{}
 	if len(failures) == 0 {
 		state.status = StatusStopped
 		state.lastError = ""
+		m.applyCandidateLocked(state)
 	} else {
 		state.status = StatusError
 		state.lastError = errors.Join(failures...).Error()
@@ -351,8 +485,10 @@ func (m *Manager) Shutdown() error {
 	m.closing.Store(true)
 	m.logger.Printf("执行完整退出清理")
 	failures := m.StopAll()
-	if err := m.tunnel.Reset(); err != nil {
-		failures = append(failures, fmt.Errorf("最终 Tunnel 清理或验证失败: %w", err))
+	if m.funnelUsed.Load() {
+		if err := m.tunnel.Reset(); err != nil {
+			failures = append(failures, fmt.Errorf("最终 Tunnel 清理或验证失败: %w", err))
+		}
 	}
 	if len(failures) == 0 {
 		m.logger.Printf("退出清理完成")
@@ -384,7 +520,11 @@ func (m *Manager) Monitor(ctx context.Context, interval time.Duration) {
 					healthErr = localserver.CheckEndpoint(snapshot.Service.LocalAddress, 2*time.Second)
 				}
 				if healthErr == nil {
-					healthErr = m.tunnel.Healthy(snapshot.Service.ID)
+					if snapshot.AccessMode == config.AccessFunnel {
+						healthErr = m.tunnel.Healthy(snapshot.Service.ID)
+					} else {
+						healthErr = m.directHealthy(snapshot.Service.ID)
+					}
 				}
 				if healthErr != nil {
 					m.scheduleRecovery(snapshot.Service.ID, healthErr)
@@ -392,6 +532,18 @@ func (m *Manager) Monitor(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}
+}
+
+func (m *Manager) directHealthy(id string) error {
+	m.mu.RLock()
+	state, exists := m.runtimes[id]
+	if !exists || state.directServer == nil {
+		m.mu.RUnlock()
+		return errors.New("Direct listener is not running")
+	}
+	directServer := state.directServer
+	m.mu.RUnlock()
+	return directServer.Healthy()
 }
 
 func (m *Manager) scheduleRecovery(id string, cause error) {
@@ -412,6 +564,58 @@ func (m *Manager) scheduleRecovery(id string, cause error) {
 			m.logger.Servicef(id, "自动恢复失败: %v", err)
 		}
 	}()
+}
+
+func (m *Manager) refreshNetwork() {
+	info, err := networkinfo.Detect()
+	m.mu.Lock()
+	m.networkInfo = info
+	m.networkErr = err
+	for _, state := range m.runtimes {
+		if state.status == StatusStopped {
+			m.applyCandidateLocked(state)
+		}
+	}
+	m.mu.Unlock()
+	m.logNetworkInfo()
+}
+
+func (m *Manager) logNetworkInfo() {
+	if m.logger == nil {
+		return
+	}
+	m.mu.RLock()
+	info := m.networkInfo
+	err := m.networkErr
+	m.mu.RUnlock()
+	if err != nil {
+		m.logger.Printf("网络地址检测失败: %v", err)
+		return
+	}
+	if address, ok := info.PrimaryIPv6(); ok {
+		kind := "稳定/非临时"
+		if address.Temporary {
+			kind = "临时"
+		}
+		m.logger.Printf("检测到 IPv6 Direct 地址: %s (%s, %s)", address.IP, address.InterfaceName, kind)
+	} else {
+		m.logger.Printf("未检测到公网 IPv6 地址")
+	}
+	if address, ok := info.PrimaryTailscale(); ok {
+		m.logger.Printf("检测到 Tailscale Direct 地址: %s (%s)", address.IP, address.InterfaceName)
+	} else {
+		m.logger.Printf("未检测到 Tailscale 100.x 地址")
+	}
+}
+
+func (m *Manager) applyCandidateLocked(state *runtime) {
+	mode, address, available := selectAccessMode(state.service.AccessMode, m.networkInfo)
+	state.accessMode = mode
+	state.networkWarning = ""
+	state.publicURL = ""
+	if available && (mode == config.AccessIPv6Direct || mode == config.AccessTailscaleDirect) {
+		state.publicURL = directURL(address.IP, state.service.Port)
+	}
 }
 
 func (m *Manager) runtime(id string) (*runtime, error) {
@@ -459,7 +663,21 @@ func (m *Manager) emit(id string) {
 func snapshotOf(state *runtime) Snapshot {
 	return Snapshot{
 		Service: state.service, Status: state.status, PublicURL: state.publicURL,
+		AccessMode: state.accessMode, NetworkWarning: state.networkWarning,
 		TunnelPort: state.tunnelPort, LastError: state.lastError, PortOwner: state.portOwner,
+	}
+}
+
+func AccessModeLabel(mode config.AccessMode) string {
+	switch mode {
+	case config.AccessIPv6Direct:
+		return "IPv6 Direct"
+	case config.AccessTailscaleDirect:
+		return "Tailscale Direct"
+	case config.AccessFunnel:
+		return "Tailscale Funnel"
+	default:
+		return "Auto"
 	}
 }
 

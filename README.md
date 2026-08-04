@@ -1,13 +1,16 @@
 # PortPilot
 
-PortPilot 是一个 Windows 桌面端本地服务管理工具，用于启动本地静态文件服务或接管已有 HTTP 服务，并通过 Tailscale Funnel 建立公网入口。
+PortPilot 是一个 Windows 桌面端本地服务管理工具，用于启动本地静态文件服务或接管已有 HTTP 服务，并自动选择 IPv6 Direct、Tailscale Direct 或 Tailscale Funnel 提供访问入口。
 
 ## 功能
 
 - 管理多个静态文件服务和本地代理服务
 - 启动前检测端口占用，显示进程名和 PID
 - 支持确认关闭占用进程、重新检测和自动关闭策略
-- 自动启动/停止 Tailscale Funnel，并动态获取公网地址
+- 自动选择 IPv6 Direct、Tailscale Direct 或 Tailscale Funnel
+- IPv6 Direct 通过公网 IPv6 直接访问，不经过中转服务器
+- Tailscale Direct 为 Tailnet 设备提供私网访问地址
+- Funnel 模式自动启动/停止并动态获取公网地址
 - 服务独立启动、停止、重启，支持启动全部和停止全部
 - 主界面关闭后驻留系统托盘，退出时执行完整清理
 - 自动监测本地代理和 Funnel 状态，异常时尝试恢复
@@ -15,9 +18,11 @@ PortPilot 是一个 Windows 桌面端本地服务管理工具，用于启动本�
 
 ## 运行要求
 
-PortPilot 本身是单个 Windows 可执行文件，不要求用户安装 Go 或其他开发环境。使用公网暴露前，需要安装并登录 Tailscale，并确保当前 tailnet 已允许 Funnel。
+PortPilot 本身是单个 Windows 可执行文件，不要求用户安装 Go 或其他开发环境。IPv6 Direct 不要求安装 Tailscale；使用 Tailscale Direct 或 Funnel 时，需要安装并登录 Tailscale，Funnel 还要求当前 tailnet 已允许 Funnel。
 
-Tailscale Funnel 当前可使用 `443`、`8443` 和 `10000` 三个 HTTPS 入口端口，因此 PortPilot 第一阶段最多同时建立三个公网入口。
+自动模式优先级为 `IPv6 Direct > Tailscale Direct > Tailscale Funnel`。只有 Funnel 模式要求启用 Tailscale Funnel；纯 IPv6 Direct 不依赖 Tailscale。
+
+Tailscale Funnel 当前可使用 `443`、`8443` 和 `10000` 三个 HTTPS 入口端口，因此 Funnel 模式最多同时建立三个公网入口。
 
 ## 运行数据目录
 
@@ -44,7 +49,7 @@ C:\Users\<用户名>\AppData\Local\BeyondXinXin\PortPilot\
 本地地址: http://127.0.0.1:8080
 ```
 
-本地代理服务不会启动目标程序，只检查已有地址并负责公网暴露：
+本地代理服务不会启动目标程序，只检查已有地址并负责建立访问入口：
 
 ```text
 本地地址: http://127.0.0.1:3000
@@ -66,6 +71,7 @@ C:\Users\<用户名>\AppData\Local\BeyondXinXin\PortPilot\
       "directory": "D:\\Share",
       "localAddress": "http://127.0.0.1:8080",
       "port": 8080,
+      "accessMode": "auto",
       "autoStart": true,
       "autoTerminatePortOccupant": false
     }
@@ -73,7 +79,16 @@ C:\Users\<用户名>\AppData\Local\BeyondXinXin\PortPilot\
 }
 ```
 
-公网地址、Tunnel 端口、运行状态和错误信息只保存在运行时。
+访问地址、Tunnel 端口、运行状态和错误信息只保存在运行时。
+
+`accessMode` 支持：
+
+- `auto`：按 IPv6 Direct、Tailscale Direct、Funnel 的顺序自动选择
+- `ipv6-direct`：只使用公网 IPv6，使用 HTTP 第一阶段直连
+- `tailscale-direct`：只监听 Tailscale `100.x` 地址，不启动 Funnel
+- `funnel`：始终使用 Tailscale Funnel
+
+IPv6 Direct 只负责建立本机监听。Windows 防火墙和路由器 IPv6 入站防火墙仍需允许对应端口；PortPilot 会检测 Windows 防火墙规则并显示警告，但不会因为警告偷偷切换到 Funnel。
 
 ## 构建
 
@@ -108,6 +123,8 @@ internal/ui         Windows 桌面界面和托盘
 internal/config     持久配置
 internal/manager    服务生命周期编排
 internal/localserver 静态 HTTP 服务和代理端点检查
+internal/networkinfo Windows 网卡、IPv6、Tailscale 地址和防火墙检测
+internal/direct     IPv6/Tailscale Direct 反向代理监听
 internal/portcheck  端口、PID 和进程管理
 internal/tunnel     Tailscale Funnel 管理
 internal/runlog     运行日志

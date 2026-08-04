@@ -63,6 +63,32 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	autoStart := addCheckRow(form, 5, "自动启动", initial.AutoStart)
 	autoTerminate := addCheckRow(form, 6, "自动关闭端口占用进程", initial.AutoTerminatePort)
 
+	accessGroup, _ := walk.NewGroupBox(form)
+	accessGroup.SetTitle("Access Mode")
+	accessLayout := walk.NewVBoxLayout()
+	accessLayout.SetMargins(walk.Margins{HNear: 8, VNear: 6, HFar: 8, VFar: 6})
+	accessLayout.SetSpacing(4)
+	accessGroup.SetLayout(accessLayout)
+	grid.SetRange(accessGroup, walk.Rectangle{X: 0, Y: 7, Width: 2, Height: 1})
+	autoAccess, _ := walk.NewRadioButton(accessGroup)
+	autoAccess.SetText("Auto（推荐）")
+	ipv6Access, _ := walk.NewRadioButton(accessGroup)
+	ipv6Access.SetText("IPv6 Direct - 最快，公网直连")
+	tailscaleAccess, _ := walk.NewRadioButton(accessGroup)
+	tailscaleAccess.SetText("Tailscale Direct - Tailnet 私网")
+	funnelAccess, _ := walk.NewRadioButton(accessGroup)
+	funnelAccess.SetText("Tailscale Funnel - 公网中继")
+	switch initial.AccessMode {
+	case config.AccessIPv6Direct:
+		ipv6Access.SetChecked(true)
+	case config.AccessTailscaleDirect:
+		tailscaleAccess.SetChecked(true)
+	case config.AccessFunnel:
+		funnelAccess.SetChecked(true)
+	default:
+		autoAccess.SetChecked(true)
+	}
+
 	updateType := func() {
 		isStatic := typeCombo.CurrentIndex() == 0
 		directoryEdit.SetEnabled(isStatic)
@@ -103,9 +129,18 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		if typeCombo.CurrentIndex() == 1 {
 			serviceType = config.ServiceProxy
 		}
+		accessMode := config.AccessAuto
+		switch {
+		case ipv6Access.Checked():
+			accessMode = config.AccessIPv6Direct
+		case tailscaleAccess.Checked():
+			accessMode = config.AccessTailscaleDirect
+		case funnelAccess.Checked():
+			accessMode = config.AccessFunnel
+		}
 		result = config.NormalizeService(config.Service{
 			ID: initial.ID, Name: nameEdit.Text(), Type: serviceType,
-			Directory: directoryEdit.Text(), LocalAddress: addressEdit.Text(), Port: port,
+			Directory: directoryEdit.Text(), LocalAddress: addressEdit.Text(), Port: port, AccessMode: accessMode,
 			AutoStart: autoStart.Checked(), AutoTerminatePort: autoTerminate.Checked(),
 		})
 		if result.Type == config.ServiceProxy && result.Port == 0 {
@@ -122,8 +157,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		dialog.Accept()
 	})
 
-	dialog.SetMinMaxSize(walk.Size{Width: 400, Height: 390}, walk.Size{})
-	dialog.SetSize(walk.Size{Width: 400, Height: 390})
+	dialog.SetMinMaxSize(walk.Size{Width: 400, Height: 530}, walk.Size{})
+	dialog.SetSize(walk.Size{Width: 400, Height: 530})
 	if dialog.Run() != int(walk.DlgCmdOK) {
 		return config.Service{}, false
 	}

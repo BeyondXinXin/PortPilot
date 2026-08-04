@@ -21,10 +21,18 @@ const (
 )
 
 type ServiceType string
+type AccessMode string
 
 const (
 	ServiceStatic ServiceType = "static"
 	ServiceProxy  ServiceType = "proxy"
+)
+
+const (
+	AccessAuto            AccessMode = "auto"
+	AccessIPv6Direct      AccessMode = "ipv6-direct"
+	AccessTailscaleDirect AccessMode = "tailscale-direct"
+	AccessFunnel          AccessMode = "funnel"
 )
 
 type Service struct {
@@ -34,6 +42,7 @@ type Service struct {
 	Directory         string      `json:"directory,omitempty"`
 	LocalAddress      string      `json:"localAddress"`
 	Port              int         `json:"port"`
+	AccessMode        AccessMode  `json:"accessMode"`
 	AutoStart         bool        `json:"autoStart"`
 	AutoTerminatePort bool        `json:"autoTerminatePortOccupant"`
 }
@@ -142,6 +151,9 @@ func NormalizeService(service Service) Service {
 	if service.ID == "" {
 		service.ID = NewID()
 	}
+	if service.AccessMode == "" {
+		service.AccessMode = AccessAuto
+	}
 	if service.Type == ServiceStatic {
 		service.LocalAddress = fmt.Sprintf("http://127.0.0.1:%d", service.Port)
 	}
@@ -157,6 +169,11 @@ func ValidateService(service Service) error {
 	}
 	if service.Port < 1 || service.Port > 65535 {
 		return errors.New("端口必须在 1 到 65535 之间")
+	}
+	switch service.AccessMode {
+	case AccessAuto, AccessIPv6Direct, AccessTailscaleDirect, AccessFunnel:
+	default:
+		return errors.New("访问模式必须是 auto、ipv6-direct、tailscale-direct 或 funnel")
 	}
 	if service.Type == ServiceStatic {
 		if strings.TrimSpace(service.Directory) == "" {

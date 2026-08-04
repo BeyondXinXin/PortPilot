@@ -70,9 +70,9 @@ func (ui *MainWindow) build() error {
 	ui.addButton(toolbar, "停止全部", ui.stopAll)
 	_, _ = walk.NewHSpacer(toolbar)
 	ui.addButton(toolbar, "打开本地", func() { ui.openSelected(false) })
-	ui.addButton(toolbar, "打开公网", func() { ui.openSelected(true) })
+	ui.addButton(toolbar, "打开访问", func() { ui.openSelected(true) })
 	ui.addButton(toolbar, "复制本地", func() { ui.copySelected(false) })
-	ui.addButton(toolbar, "复制公网", func() { ui.copySelected(true) })
+	ui.addButton(toolbar, "复制访问", func() { ui.copySelected(true) })
 	ui.addButton(toolbar, "日志", ui.openLog)
 	ui.addButton(toolbar, "设置", ui.settings)
 
@@ -85,7 +85,7 @@ func (ui *MainWindow) build() error {
 	for _, column := range []struct {
 		title string
 		width int
-	}{{"服务名称", 150}, {"类型", 100}, {"状态", 80}, {"本地地址", 230}, {"公网地址", 300}, {"Tunnel", 100}} {
+	}{{"服务名称", 150}, {"类型", 100}, {"状态", 80}, {"本地地址", 230}, {"访问地址", 300}, {"Access Mode", 120}} {
 		viewColumn := walk.NewTableViewColumn()
 		viewColumn.SetTitle(column.title)
 		viewColumn.SetWidth(column.width)
@@ -213,6 +213,10 @@ func (ui *MainWindow) updateStatus() {
 	text := fmt.Sprintf("%s | %s | %s | 端口 %d", selected.Service.Name, manager.StatusLabel(selected.Status), selected.Service.LocalAddress, selected.Service.Port)
 	if selected.PublicURL != "" {
 		text += " | " + selected.PublicURL
+	}
+	text += " | " + manager.AccessModeLabel(selected.AccessMode)
+	if selected.NetworkWarning != "" {
+		text += " | " + selected.NetworkWarning
 	}
 	if selected.LastError != "" {
 		text += " | " + selected.LastError
@@ -370,7 +374,7 @@ func (ui *MainWindow) openSelected(public bool) {
 		target = selected.PublicURL
 	}
 	if target == "" {
-		walk.MsgBox(ui.window, "地址不可用", "服务尚未获得公网地址。", walk.MsgBoxIconWarning)
+		walk.MsgBox(ui.window, "地址不可用", "服务尚未获得访问地址。", walk.MsgBoxIconWarning)
 		return
 	}
 	if err := winutil.Open(target); err != nil {
@@ -387,10 +391,10 @@ func (ui *MainWindow) copySelected(public bool) {
 	label := "本地地址"
 	if public {
 		target = selected.PublicURL
-		label = "公网地址"
+		label = "访问地址"
 	}
 	if target == "" {
-		walk.MsgBox(ui.window, "地址不可用", "服务尚未获得公网地址。", walk.MsgBoxIconWarning)
+		walk.MsgBox(ui.window, "地址不可用", "服务尚未获得访问地址。", walk.MsgBoxIconWarning)
 		return
 	}
 	if err := walk.Clipboard().SetText(target); err != nil {
