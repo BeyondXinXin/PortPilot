@@ -71,6 +71,8 @@ func (ui *MainWindow) build() error {
 	_, _ = walk.NewHSpacer(toolbar)
 	ui.addButton(toolbar, "打开本地", func() { ui.openSelected(false) })
 	ui.addButton(toolbar, "打开公网", func() { ui.openSelected(true) })
+	ui.addButton(toolbar, "复制本地", func() { ui.copySelected(false) })
+	ui.addButton(toolbar, "复制公网", func() { ui.copySelected(true) })
 	ui.addButton(toolbar, "日志", ui.openLog)
 	ui.addButton(toolbar, "设置", ui.settings)
 
@@ -374,6 +376,28 @@ func (ui *MainWindow) openSelected(public bool) {
 	if err := winutil.Open(target); err != nil {
 		walk.MsgBox(ui.window, "打开失败", err.Error(), walk.MsgBoxIconError)
 	}
+}
+
+func (ui *MainWindow) copySelected(public bool) {
+	selected, ok := ui.selected()
+	if !ok {
+		return
+	}
+	target := selected.Service.LocalAddress
+	label := "本地地址"
+	if public {
+		target = selected.PublicURL
+		label = "公网地址"
+	}
+	if target == "" {
+		walk.MsgBox(ui.window, "地址不可用", "服务尚未获得公网地址。", walk.MsgBoxIconWarning)
+		return
+	}
+	if err := walk.Clipboard().SetText(target); err != nil {
+		walk.MsgBox(ui.window, "复制失败", err.Error(), walk.MsgBoxIconError)
+		return
+	}
+	ui.status.SetText(label + "已复制：" + target)
 }
 
 func (ui *MainWindow) openLog() {

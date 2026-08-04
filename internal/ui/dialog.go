@@ -17,7 +17,6 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	}
 	defer dialog.Dispose()
 	dialog.SetTitle("服务配置")
-	dialog.SetSize(walk.Size{Width: 1120, Height: 390})
 	layout := walk.NewVBoxLayout()
 	layout.SetMargins(walk.Margins{HNear: 14, VNear: 14, HFar: 14, VFar: 14})
 	layout.SetSpacing(10)
@@ -123,6 +122,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		dialog.Accept()
 	})
 
+	dialog.SetMinMaxSize(walk.Size{Width: 400, Height: 390}, walk.Size{})
+	dialog.SetSize(walk.Size{Width: 400, Height: 390})
 	if dialog.Run() != int(walk.DlgCmdOK) {
 		return config.Service{}, false
 	}
