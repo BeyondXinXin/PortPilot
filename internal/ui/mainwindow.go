@@ -16,6 +16,8 @@ import (
 	"github.com/lxn/walk"
 )
 
+const WindowTitle = "PortPilot - 本地服务公网管理"
+
 type MainWindow struct {
 	baseDir  string
 	config   config.Config
@@ -45,7 +47,7 @@ func NewMainWindow(baseDir string, cfg config.Config, serviceManager *manager.Ma
 }
 
 func (ui *MainWindow) build() error {
-	ui.window.SetTitle("PortPilot - 本地服务公网管理")
+	ui.window.SetTitle(WindowTitle)
 	ui.window.SetSize(walk.Size{Width: 1040, Height: 620})
 	ui.window.SetMinMaxSize(walk.Size{Width: 840, Height: 480}, walk.Size{})
 	layout := walk.NewVBoxLayout()

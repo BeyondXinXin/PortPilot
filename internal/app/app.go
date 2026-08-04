@@ -14,6 +14,7 @@ import (
 	"github.com/BeyondXinXin/portpilot/internal/runlog"
 	"github.com/BeyondXinXin/portpilot/internal/tunnel"
 	"github.com/BeyondXinXin/portpilot/internal/ui"
+	"github.com/BeyondXinXin/portpilot/internal/winutil"
 	"github.com/lxn/walk"
 )
 
@@ -22,6 +23,19 @@ var iconData []byte
 
 func Main() {
 	runtime.LockOSThread()
+	instance, alreadyRunning, err := winutil.AcquireSingleInstance(`Local\BeyondXinXin.PortPilot.Instance`)
+	if err != nil {
+		walk.MsgBox(nil, "PortPilot", "创建单进程锁失败：\r\n"+err.Error(), walk.MsgBoxIconError)
+		return
+	}
+	if alreadyRunning {
+		if !winutil.ActivateWindow(ui.WindowTitle, 3*time.Second) {
+			walk.MsgBox(nil, "PortPilot", "PortPilot 已在运行。", walk.MsgBoxIconInformation)
+		}
+		return
+	}
+	defer instance.Close()
+
 	executableDirectory := executableDir()
 	dataDirectory := config.Directory(executableDirectory)
 	if _, err := config.Ensure(executableDirectory); err != nil {
