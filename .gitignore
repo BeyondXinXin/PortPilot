@@ -1,0 +1,6 @@
+PortPilot.exe
+dist/
+*.log
+.tools/
+config/services.json
+logs/*.log
