@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,10 +35,7 @@ func Start(ip net.IP, port int, targetAddress string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("监听 Direct 地址 %s 失败: %w", listenAddress, err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, proxyErr error) {
-		http.Error(writer, "PortPilot target unavailable", http.StatusBadGateway)
-	}
+	proxy := newReverseProxy(target)
 	server := &http.Server{
 		Handler:           proxy,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -54,6 +52,30 @@ func Start(ip net.IP, port int, targetAddress string) (*Server, error) {
 		instance.mu.Unlock()
 	}()
 	return instance, nil
+}
+
+func newReverseProxy(target *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	if isLocalTarget(target) {
+		director := proxy.Director
+		targetOrigin := target.Scheme + "://" + target.Host
+		proxy.Director = func(request *http.Request) {
+			director(request)
+			request.Host = target.Host
+			if request.Header.Get("Origin") != "" {
+				request.Header.Set("Origin", targetOrigin)
+			}
+		}
+	}
+	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, proxyErr error) {
+		http.Error(writer, "PortPilot target unavailable", http.StatusBadGateway)
+	}
+	return proxy
+}
+
+func isLocalTarget(target *url.URL) bool {
+	host := target.Hostname()
+	return host == "127.0.0.1" || strings.EqualFold(host, "localhost")
 }
 
 func (s *Server) Healthy() error {

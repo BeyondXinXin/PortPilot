@@ -1,134 +1,61 @@
 # PortPilot
 
-PortPilot 是一个 Windows 桌面端本地服务管理工具，用于启动本地静态文件服务或接管已有 HTTP 服务，并自动选择 IPv6 Direct、Tailscale Direct 或 Tailscale Funnel 提供访问入口。
+PortPilot 是 Windows 上的本地服务发布工具。它可以启动静态网站，或把已有的本地 HTTP 服务安全地提供给局域网、Tailnet 或公网访问。
 
-## 功能
+## 特点
 
-- 管理多个静态文件服务和本地代理服务
-- 启动前检测端口占用，显示进程名和 PID
-- 支持确认关闭占用进程、重新检测和自动关闭策略
-- 自动选择 IPv6 Direct、Tailscale Direct 或 Tailscale Funnel
-- IPv6 Direct 通过公网 IPv6 直接访问，不经过中转服务器
-- Tailscale Direct 为 Tailnet 设备提供私网访问地址
-- Funnel 模式自动启动/停止并动态获取公网地址
-- 服务独立启动、停止、重启，支持启动全部和停止全部
-- 主界面关闭后驻留系统托盘，退出时执行完整清理
-- 自动监测本地代理和 Funnel 状态，异常时尝试恢复
-- 配置与运行状态分离，临时公网地址不会写入配置
+- 一个桌面应用管理多个静态网站和本地代理服务
+- 自动检测端口占用，可提示或自动关闭占用进程
+- 服务可单独启动、停止、重启，并支持自动启动与状态监测
+- 支持 IPv6 Direct、Tailscale Direct、Tailscale Serve 和 Tailscale Funnel
+- 关闭主窗口后继续驻留系统托盘；退出时自动清理访问入口
+- 配置、日志和图标资源自动保存在用户数据目录，不污染程序目录
 
-## 运行要求
+## 适用场景
 
-PortPilot 本身是单个 Windows 可执行文件，不要求用户安装 Go 或其他开发环境。IPv6 Direct 不要求安装 Tailscale；使用 Tailscale Direct 或 Funnel 时，需要安装并登录 Tailscale，Funnel 还要求当前 tailnet 已允许 Funnel。
+- 在自己的公网 IPv6 网络上快速发布静态网站
+- 让 Tailnet 中的设备访问开发机上的 Web 服务
+- 为本地服务生成 Tailscale 的 HTTPS 地址，无需自己配置证书
+- 将网站临时通过 Tailscale Funnel 公开到互联网
+- 将 DeepSeek Harness 等只信任本机来源的服务安全地分享给 Tailnet
 
-自动模式优先级为 `IPv6 Direct > Tailscale Direct > Tailscale Funnel`。只有 Funnel 模式要求启用 Tailscale Funnel；纯 IPv6 Direct 不依赖 Tailscale。
+## 添加服务
 
-Tailscale Funnel 当前可使用 `443`、`8443` 和 `10000` 三个 HTTPS 入口端口，因此 Funnel 模式最多同时建立三个公网入口。
+在 PortPilot 中点击“添加服务”。
 
-## 运行数据目录
+- **静态文件服务**：选择网站目录和端口，PortPilot 会启动文件服务。
+- **本地代理服务**：填写已经运行的本地地址，例如 `http://127.0.0.1:3000`；PortPilot 不会启动目标程序，只负责访问入口。
 
-```text
-C:\Users\<用户名>\AppData\Local\BeyondXinXin\PortPilot\
-  config/
-    services.json
-  logs/
-    PortPilot.log
-  resources/
-    portpilot.ico
-    portpilot.png
-```
+## 访问方式
 
-首次运行会自动补齐缺少的目录和配置文件。程序目录只需要保留 `PortPilot.exe`，配置、日志和运行资源不会写到 EXE 所在目录。
+| 方式 | 适合什么情况 | 访问地址 |
+| --- | --- | --- |
+| Auto | 不想手动选择，优先直连 | 自动选择 IPv6 Direct、Tailscale Direct 或 Funnel |
+| IPv6 Direct | 有可用公网 IPv6 | `http://[IPv6]:端口` |
+| Tailscale Direct | Tailnet 内普通 HTTP 服务 | `http://100.x.x.x:端口` |
+| Tailscale Serve | Tailnet 内需要 HTTPS 的服务 | `https://设备名.<tailnet>.ts.net` |
+| Tailscale Funnel | 需要公开给互联网 | Tailscale 分配的 HTTPS 地址 |
 
-## 服务类型
+使用 Tailscale 的方式需要安装并登录 Tailscale。Serve 会自动使用 Tailscale 的 HTTPS 证书；Funnel 需要 Tailnet 已允许 Funnel。
 
-静态文件服务由 PortPilot 内置 HTTP 服务启动：
+## DeepSeek Harness
 
-```text
-目录: D:\Share
-端口: 8080
-本地地址: http://127.0.0.1:8080
-```
+Harness Web UI 需要 HTTPS 才能使用浏览器的 `crypto.randomUUID()`。请使用 **Tailscale Serve - Tailnet HTTPS（Harness 推荐）**，不要使用 `http://100.x.x.x:端口`。
 
-本地代理服务不会启动目标程序，只检查已有地址并负责建立访问入口：
+示例：
 
 ```text
-本地地址: http://127.0.0.1:3000
-端口: 3000
+Harness:          http://127.0.0.1:3081
+PortPilot 端口:    8088
+访问地址:          https://<设备>.<tailnet>.ts.net
 ```
 
-## 配置
+PortPilot 会先在 `127.0.0.1:8088` 建立代理，再由 Tailscale Serve 转发到它。转发给 Harness 时，会把 `Host` 和已有的 `Origin` 重写为 Harness 的本地地址；普通 HTTP 和 WebSocket 都适用。
 
-配置位于 `%LOCALAPPDATA%\BeyondXinXin\PortPilot\config\services.json`。建议通过界面维护，主要字段如下：
+## 数据位置
 
-```json
-{
-  "tailscalePath": "tailscale.exe",
-  "services": [
-    {
-      "id": "svc-example",
-      "name": "Website",
-      "type": "static",
-      "directory": "D:\\Share",
-      "localAddress": "http://127.0.0.1:8080",
-      "port": 8080,
-      "accessMode": "auto",
-      "autoStart": true,
-      "autoTerminatePortOccupant": false
-    }
-  ]
-}
-```
-
-访问地址、Tunnel 端口、运行状态和错误信息只保存在运行时。
-
-`accessMode` 支持：
-
-- `auto`：按 IPv6 Direct、Tailscale Direct、Funnel 的顺序自动选择
-- `ipv6-direct`：只使用公网 IPv6，使用 HTTP 第一阶段直连
-- `tailscale-direct`：只监听 Tailscale `100.x` 地址，不启动 Funnel
-- `funnel`：始终使用 Tailscale Funnel
-
-IPv6 Direct 只负责建立本机监听。Windows 防火墙和路由器 IPv6 入站防火墙仍需允许对应端口；PortPilot 会检测 Windows 防火墙规则并显示警告，但不会因为警告偷偷切换到 Funnel。
-
-## 构建
-
-安装 Go 1.26 或更高版本后运行：
-
-```bat
-build.cmd
-```
-
-如果 `go.exe` 不在 `PATH`，可以先指定：
-
-```bat
-set GO_EXE=C:\Go\bin\go.exe
-build.cmd
-```
-
-生成单文件便携发布目录：
-
-```bat
-release.cmd
-```
-
-发布结果位于 `dist\PortPilot\PortPilot.exe`。首次运行后，配置、日志和托盘图标副本会写入 `%LOCALAPPDATA%\BeyondXinXin\PortPilot`。
-
-## 工程结构
+配置和日志位于：
 
 ```text
-cmd/portpilot       程序入口
-cmd/makeicon        图标资源生成
-internal/app        应用装配
-internal/ui         Windows 桌面界面和托盘
-internal/config     持久配置
-internal/manager    服务生命周期编排
-internal/localserver 静态 HTTP 服务和代理端点检查
-internal/networkinfo Windows 网卡、IPv6、Tailscale 地址和防火墙检测
-internal/direct     IPv6/Tailscale Direct 反向代理监听
-internal/portcheck  端口、PID 和进程管理
-internal/tunnel     Tailscale Funnel 管理
-internal/runlog     运行日志
-internal/winutil    Windows 系统调用辅助
+%LOCALAPPDATA%\BeyondXinXin\PortPilot\
 ```
-
-`assets/portpilot.exe.manifest` 会在构建时与图标一起嵌入 EXE，用于启用 Windows Common Controls v6 和高 DPI 支持。

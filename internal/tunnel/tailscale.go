@@ -24,13 +24,18 @@ type Assignment struct {
 }
 
 type Manager struct {
-	executable string
-	mu         sync.Mutex
-	active     map[string]Assignment
+	executable  string
+	mu          sync.Mutex
+	active      map[string]Assignment
+	activeServe map[string]Assignment
 }
 
 func New(executable string) *Manager {
-	return &Manager{executable: resolveExecutable(executable), active: make(map[string]Assignment)}
+	return &Manager{
+		executable:  resolveExecutable(executable),
+		active:      make(map[string]Assignment),
+		activeServe: make(map[string]Assignment),
+	}
 }
 
 func (m *Manager) Available() error {
@@ -104,6 +109,43 @@ func (m *Manager) Start(serviceID, target string) (Assignment, error) {
 	return assignment, nil
 }
 
+// StartServe configures a private Tailscale HTTPS endpoint that proxies to target.
+func (m *Manager) StartServe(serviceID, target string) (Assignment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.activeServe[serviceID]; ok {
+		return existing, nil
+	}
+	if err := m.Available(); err != nil {
+		return Assignment{}, err
+	}
+	port, err := m.availablePort()
+	if err != nil {
+		return Assignment{}, err
+	}
+	output, err := m.run("serve", "--bg", fmt.Sprintf("--https=%d", port), target)
+	if err != nil {
+		return Assignment{}, err
+	}
+	publicURL := extractPublicURL(output)
+	if publicURL == "" {
+		for attempt := 0; attempt < 5 && publicURL == ""; attempt++ {
+			time.Sleep(250 * time.Millisecond)
+			status, statusErr := m.run("serve", "status")
+			if statusErr == nil {
+				publicURL = extractURLForPort(status, port)
+			}
+		}
+	}
+	if publicURL == "" {
+		_ = m.stopServePort(port)
+		return Assignment{}, errors.New("Tailscale Serve 已启动，但未能获取 HTTPS 地址")
+	}
+	assignment := Assignment{ServiceID: serviceID, HTTPSPort: port, PublicURL: strings.TrimRight(publicURL, "/")}
+	m.activeServe[serviceID] = assignment
+	return assignment, nil
+}
+
 func (m *Manager) Stop(serviceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -114,6 +156,20 @@ func (m *Manager) Stop(serviceID string) error {
 	err := m.stopPort(assignment.HTTPSPort)
 	if err == nil {
 		delete(m.active, serviceID)
+	}
+	return err
+}
+
+func (m *Manager) StopServe(serviceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	assignment, ok := m.activeServe[serviceID]
+	if !ok {
+		return nil
+	}
+	err := m.stopServePort(assignment.HTTPSPort)
+	if err == nil {
+		delete(m.activeServe, serviceID)
 	}
 	return err
 }
@@ -136,15 +192,41 @@ func (m *Manager) Healthy(serviceID string) error {
 	return nil
 }
 
+func (m *Manager) HealthyServe(serviceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	assignment, ok := m.activeServe[serviceID]
+	if !ok {
+		return errors.New("服务没有活动的 Tailscale Serve")
+	}
+	status, err := m.run("serve", "status")
+	if err != nil {
+		return err
+	}
+	publicURL := strings.TrimRight(assignment.PublicURL, "/")
+	if !strings.Contains(status, publicURL) {
+		return fmt.Errorf("Tailscale Serve 状态中未找到 %s", publicURL)
+	}
+	return nil
+}
+
 func (m *Manager) stopPort(port int) error {
 	_, err := m.run("funnel", fmt.Sprintf("--https=%d", port), "off")
 	return err
 }
 
+func (m *Manager) stopServePort(port int) error {
+	_, err := m.run("serve", fmt.Sprintf("--https=%d", port), "off")
+	return err
+}
+
 func (m *Manager) availablePort() (int, error) {
 	ports := []int{443, 8443, 10000}
-	used := make(map[int]struct{}, len(m.active))
+	used := make(map[int]struct{}, len(m.active)+len(m.activeServe))
 	for _, assignment := range m.active {
+		used[assignment.HTTPSPort] = struct{}{}
+	}
+	for _, assignment := range m.activeServe {
 		used[assignment.HTTPSPort] = struct{}{}
 	}
 	for _, port := range ports {
@@ -152,7 +234,7 @@ func (m *Manager) availablePort() (int, error) {
 			return port, nil
 		}
 	}
-	return 0, errors.New("Tailscale Funnel 最多同时使用 3 个 HTTPS 入口端口")
+	return 0, errors.New("PortPilot 最多同时使用 3 个 Tailscale HTTPS 入口端口")
 }
 
 func (m *Manager) run(args ...string) (string, error) {

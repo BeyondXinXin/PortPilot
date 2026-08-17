@@ -76,6 +76,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	ipv6Access.SetText("IPv6 Direct - 最快，公网直连")
 	tailscaleAccess, _ := walk.NewRadioButton(accessGroup)
 	tailscaleAccess.SetText("Tailscale Direct - Tailnet 私网")
+	tailscaleServeAccess, _ := walk.NewRadioButton(accessGroup)
+	tailscaleServeAccess.SetText("Tailscale Serve - Tailnet HTTPS（Harness 推荐）")
 	funnelAccess, _ := walk.NewRadioButton(accessGroup)
 	funnelAccess.SetText("Tailscale Funnel - 公网中继")
 	switch initial.AccessMode {
@@ -83,6 +85,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		ipv6Access.SetChecked(true)
 	case config.AccessTailscaleDirect:
 		tailscaleAccess.SetChecked(true)
+	case config.AccessTailscaleServe:
+		tailscaleServeAccess.SetChecked(true)
 	case config.AccessFunnel:
 		funnelAccess.SetChecked(true)
 	default:
@@ -135,6 +139,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 			accessMode = config.AccessIPv6Direct
 		case tailscaleAccess.Checked():
 			accessMode = config.AccessTailscaleDirect
+		case tailscaleServeAccess.Checked():
+			accessMode = config.AccessTailscaleServe
 		case funnelAccess.Checked():
 			accessMode = config.AccessFunnel
 		}
@@ -157,8 +163,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		dialog.Accept()
 	})
 
-	dialog.SetMinMaxSize(walk.Size{Width: 400, Height: 530}, walk.Size{})
-	dialog.SetSize(walk.Size{Width: 400, Height: 530})
+	dialog.SetMinMaxSize(walk.Size{Width: 400, Height: 560}, walk.Size{})
+	dialog.SetSize(walk.Size{Width: 400, Height: 560})
 	if dialog.Run() != int(walk.DlgCmdOK) {
 		return config.Service{}, false
 	}

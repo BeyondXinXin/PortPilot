@@ -85,6 +85,9 @@ type tunnelController interface {
 	Start(serviceID, target string) (tunnel.Assignment, error)
 	Stop(serviceID string) error
 	Healthy(serviceID string) error
+	StartServe(serviceID, target string) (tunnel.Assignment, error)
+	StopServe(serviceID string) error
+	HealthyServe(serviceID string) error
 }
 
 func New(services []config.Service, tunnelManager tunnelController, logger *runlog.Logger) *Manager {
@@ -316,6 +319,26 @@ func (m *Manager) startAccess(serviceID string, service config.Service) (accessS
 		}
 		warning := directWarning(mode, service.Port)
 		return accessStart{mode: mode, url: accessURL, warning: warning, directServer: directServer}, nil
+	case config.AccessTailscaleServe:
+		m.logger.Servicef(serviceID, "Network Mode: Tailscale Serve selected")
+		serveTarget := fmt.Sprintf("http://127.0.0.1:%d", service.Port)
+		var directServer *direct.Server
+		if service.Type == config.ServiceProxy {
+			m.logger.Servicef(serviceID, "Harness compatible proxy: %s -> %s", serveTarget, service.LocalAddress)
+			startedProxy, startErr := direct.Start(net.ParseIP("127.0.0.1"), service.Port, service.LocalAddress)
+			if startErr != nil {
+				return accessStart{}, startErr
+			}
+			directServer = startedProxy
+		}
+		assignment, serveErr := m.tunnel.StartServe(serviceID, serveTarget)
+		if serveErr != nil {
+			if directServer != nil {
+				_ = directServer.Stop(context.Background())
+			}
+			return accessStart{}, serveErr
+		}
+		return accessStart{mode: mode, url: assignment.PublicURL, tunnelPort: assignment.HTTPSPort, directServer: directServer}, nil
 	default:
 		if service.AccessMode == config.AccessAuto {
 			m.logger.Servicef(serviceID, "Fallback: Tailscale Funnel")
@@ -341,6 +364,8 @@ func selectAccessMode(requested config.AccessMode, info networkinfo.Info) (confi
 	case config.AccessTailscaleDirect:
 		address, ok := info.PrimaryTailscale()
 		return config.AccessTailscaleDirect, address, ok
+	case config.AccessTailscaleServe:
+		return config.AccessTailscaleServe, networkinfo.Address{}, true
 	case config.AccessFunnel:
 		return config.AccessFunnel, networkinfo.Address{}, true
 	default:
@@ -401,6 +426,13 @@ func (m *Manager) Stop(id string) error {
 			m.logger.Servicef(id, "关闭 Funnel 失败: %v", err)
 		} else {
 			m.logger.Servicef(id, "Funnel 已关闭")
+		}
+	} else if accessMode == config.AccessTailscaleServe {
+		if err := m.tunnel.StopServe(id); err != nil {
+			failures = append(failures, fmt.Errorf("关闭 Tailscale Serve: %w", err))
+			m.logger.Servicef(id, "关闭 Tailscale Serve 失败: %v", err)
+		} else {
+			m.logger.Servicef(id, "Tailscale Serve 已关闭")
 		}
 	}
 	if directServer != nil {
@@ -522,6 +554,8 @@ func (m *Manager) Monitor(ctx context.Context, interval time.Duration) {
 				if healthErr == nil {
 					if snapshot.AccessMode == config.AccessFunnel {
 						healthErr = m.tunnel.Healthy(snapshot.Service.ID)
+					} else if snapshot.AccessMode == config.AccessTailscaleServe {
+						healthErr = m.tunnel.HealthyServe(snapshot.Service.ID)
 					} else {
 						healthErr = m.directHealthy(snapshot.Service.ID)
 					}
@@ -674,6 +708,8 @@ func AccessModeLabel(mode config.AccessMode) string {
 		return "IPv6 Direct"
 	case config.AccessTailscaleDirect:
 		return "Tailscale Direct"
+	case config.AccessTailscaleServe:
+		return "Tailscale Serve"
 	case config.AccessFunnel:
 		return "Tailscale Funnel"
 	default:

@@ -32,6 +32,7 @@ const (
 	AccessAuto            AccessMode = "auto"
 	AccessIPv6Direct      AccessMode = "ipv6-direct"
 	AccessTailscaleDirect AccessMode = "tailscale-direct"
+	AccessTailscaleServe  AccessMode = "tailscale-serve"
 	AccessFunnel          AccessMode = "funnel"
 )
 
@@ -171,9 +172,9 @@ func ValidateService(service Service) error {
 		return errors.New("端口必须在 1 到 65535 之间")
 	}
 	switch service.AccessMode {
-	case AccessAuto, AccessIPv6Direct, AccessTailscaleDirect, AccessFunnel:
+	case AccessAuto, AccessIPv6Direct, AccessTailscaleDirect, AccessTailscaleServe, AccessFunnel:
 	default:
-		return errors.New("访问模式必须是 auto、ipv6-direct、tailscale-direct 或 funnel")
+		return errors.New("访问模式必须是 auto、ipv6-direct、tailscale-direct、tailscale-serve 或 funnel")
 	}
 	if service.Type == ServiceStatic {
 		if strings.TrimSpace(service.Directory) == "" {

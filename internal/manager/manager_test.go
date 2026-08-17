@@ -17,9 +17,12 @@ import (
 )
 
 type fakeTunnel struct {
-	started int
-	stopped int
-	reset   int
+	started      int
+	stopped      int
+	serveStarted int
+	serveStopped int
+	reset        int
+	serveTarget  string
 }
 
 func (f *fakeTunnel) Reset() error {
@@ -38,6 +41,21 @@ func (f *fakeTunnel) Stop(serviceID string) error {
 }
 
 func (f *fakeTunnel) Healthy(serviceID string) error {
+	return nil
+}
+
+func (f *fakeTunnel) StartServe(serviceID, target string) (tunnel.Assignment, error) {
+	f.serveStarted++
+	f.serveTarget = target
+	return tunnel.Assignment{ServiceID: serviceID, HTTPSPort: 443, PublicURL: "https://test.tail.ts.net"}, nil
+}
+
+func (f *fakeTunnel) StopServe(serviceID string) error {
+	f.serveStopped++
+	return nil
+}
+
+func (f *fakeTunnel) HealthyServe(serviceID string) error {
 	return nil
 }
 
@@ -154,6 +172,76 @@ func TestFunnelShutdownPerformsFinalReset(t *testing.T) {
 	}
 	if funnel.started != 1 || funnel.stopped != 1 || funnel.reset != 1 {
 		t.Fatalf("unexpected Funnel cleanup: start=%d stop=%d reset=%d", funnel.started, funnel.stopped, funnel.reset)
+	}
+}
+
+func TestTailscaleServeUsesHarnessCompatibleProxy(t *testing.T) {
+	targetListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetListener.Close()
+	targetPort := targetListener.Addr().(*net.TCPAddr).Port
+	var receivedHost, receivedOrigin string
+	targetServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		receivedHost = request.Host
+		receivedOrigin = request.Header.Get("Origin")
+		_, _ = writer.Write([]byte("harness"))
+	})}
+	go targetServer.Serve(targetListener)
+	defer targetServer.Close()
+
+	proxyPort := freePort(t)
+	base := t.TempDir()
+	logger, err := runlog.Open(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+	tunnelManager := &fakeTunnel{}
+	service := config.NormalizeService(config.Service{
+		ID: "harness", Name: "Harness", Type: config.ServiceProxy,
+		LocalAddress: fmt.Sprintf("http://127.0.0.1:%d", targetPort), Port: proxyPort,
+		AccessMode: config.AccessTailscaleServe,
+	})
+	serviceManager := New([]config.Service{service}, tunnelManager, logger)
+	if err := serviceManager.Start(service.ID); err != nil {
+		t.Fatal(err)
+	}
+	defer serviceManager.Stop(service.ID)
+
+	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/", proxyPort), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = "yx.tail9d1a91.ts.net"
+	request.Header.Set("Origin", "https://yx.tail9d1a91.ts.net")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if string(body) != "harness" {
+		t.Fatalf("body = %q, want harness", body)
+	}
+	if got, want := receivedHost, fmt.Sprintf("127.0.0.1:%d", targetPort); got != want {
+		t.Errorf("Harness Host = %q, want %q", got, want)
+	}
+	if got, want := receivedOrigin, fmt.Sprintf("http://127.0.0.1:%d", targetPort); got != want {
+		t.Errorf("Harness Origin = %q, want %q", got, want)
+	}
+	if got, want := tunnelManager.serveTarget, fmt.Sprintf("http://127.0.0.1:%d", proxyPort); got != want {
+		t.Errorf("Tailscale Serve target = %q, want %q", got, want)
+	}
+	if tunnelManager.serveStarted != 1 {
+		t.Fatalf("Tailscale Serve start count = %d, want 1", tunnelManager.serveStarted)
+	}
+	if err := serviceManager.Stop(service.ID); err != nil {
+		t.Fatal(err)
+	}
+	if tunnelManager.serveStopped != 1 {
+		t.Fatalf("Tailscale Serve stop count = %d, want 1", tunnelManager.serveStopped)
 	}
 }
 
