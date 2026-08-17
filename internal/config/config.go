@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,8 +25,10 @@ type ServiceType string
 type AccessMode string
 
 const (
-	ServiceStatic ServiceType = "static"
-	ServiceProxy  ServiceType = "proxy"
+	ServiceStatic       ServiceType = "static"
+	ServiceProxy        ServiceType = "proxy"
+	ServiceBridgeServer ServiceType = "bridge-server"
+	ServiceBridgeClient ServiceType = "bridge-client"
 )
 
 const (
@@ -34,6 +37,7 @@ const (
 	AccessTailscaleDirect AccessMode = "tailscale-direct"
 	AccessTailscaleServe  AccessMode = "tailscale-serve"
 	AccessFunnel          AccessMode = "funnel"
+	AccessRemoteBridge    AccessMode = "remote-bridge"
 )
 
 type Service struct {
@@ -46,6 +50,12 @@ type Service struct {
 	AccessMode        AccessMode  `json:"accessMode"`
 	AutoStart         bool        `json:"autoStart"`
 	AutoTerminatePort bool        `json:"autoTerminatePortOccupant"`
+	BridgeListenIP    string      `json:"bridgeListenIP,omitempty"`
+	BridgeListenPort  int         `json:"bridgeListenPort,omitempty"`
+	BridgeRemoteAddr  string      `json:"bridgeRemoteAddress,omitempty"`
+	BridgePairToken   string      `json:"bridgePairToken,omitempty"`
+	BridgeLaneCount   int         `json:"bridgeLaneCount,omitempty"`
+	BridgeChunkSize   int         `json:"bridgeChunkSize,omitempty"`
 }
 
 type Config struct {
@@ -149,6 +159,8 @@ func NormalizeService(service Service) Service {
 	service.Name = strings.TrimSpace(service.Name)
 	service.Directory = strings.TrimSpace(service.Directory)
 	service.LocalAddress = strings.TrimSpace(service.LocalAddress)
+	service.BridgeListenIP = strings.TrimSpace(service.BridgeListenIP)
+	service.BridgeRemoteAddr = strings.TrimSpace(service.BridgeRemoteAddr)
 	if service.ID == "" {
 		service.ID = NewID()
 	}
@@ -158,6 +170,32 @@ func NormalizeService(service Service) Service {
 	if service.Type == ServiceStatic {
 		service.LocalAddress = fmt.Sprintf("http://127.0.0.1:%d", service.Port)
 	}
+	if service.Type == ServiceBridgeClient {
+		service.LocalAddress = fmt.Sprintf("http://127.0.0.1:%d", service.Port)
+		service.AccessMode = AccessRemoteBridge
+	}
+	if service.Type == ServiceBridgeServer {
+		// Migrate the early explicit Server type to the user-facing Access Mode.
+		service.Type = ServiceProxy
+		service.AccessMode = AccessRemoteBridge
+	}
+	if service.AccessMode == AccessRemoteBridge && service.Type != ServiceBridgeClient {
+		service.AccessMode = AccessRemoteBridge
+		if service.BridgePairToken == "" {
+			service.BridgePairToken = NewPairToken()
+		}
+	}
+	if service.AccessMode == AccessRemoteBridge || service.Type == ServiceBridgeClient {
+		if service.BridgeLaneCount <= 0 {
+			service.BridgeLaneCount = 8
+		}
+		if service.BridgeChunkSize <= 0 {
+			service.BridgeChunkSize = 64 * 1024
+		}
+		if service.BridgeListenPort <= 0 {
+			service.BridgeListenPort = 39090
+		}
+	}
 	return service
 }
 
@@ -165,16 +203,16 @@ func ValidateService(service Service) error {
 	if strings.TrimSpace(service.Name) == "" {
 		return errors.New("名称不能为空")
 	}
-	if service.Type != ServiceStatic && service.Type != ServiceProxy {
-		return errors.New("服务类型必须是 static 或 proxy")
+	if service.Type != ServiceStatic && service.Type != ServiceProxy && service.Type != ServiceBridgeServer && service.Type != ServiceBridgeClient {
+		return errors.New("服务类型必须是 static、proxy、bridge-server 或 bridge-client")
 	}
 	if service.Port < 1 || service.Port > 65535 {
 		return errors.New("端口必须在 1 到 65535 之间")
 	}
 	switch service.AccessMode {
-	case AccessAuto, AccessIPv6Direct, AccessTailscaleDirect, AccessTailscaleServe, AccessFunnel:
+	case AccessAuto, AccessIPv6Direct, AccessTailscaleDirect, AccessTailscaleServe, AccessFunnel, AccessRemoteBridge:
 	default:
-		return errors.New("访问模式必须是 auto、ipv6-direct、tailscale-direct、tailscale-serve 或 funnel")
+		return errors.New("访问模式无效")
 	}
 	if service.Type == ServiceStatic {
 		if strings.TrimSpace(service.Directory) == "" {
@@ -189,7 +227,41 @@ func ValidateService(service Service) error {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return errors.New("本地地址只支持 http 或 https")
 	}
+	if service.Type == ServiceBridgeServer {
+		if net.ParseIP(service.BridgeListenIP) == nil {
+			return errors.New("Remote Bridge Server 必须填写监听 Tailscale IP")
+		}
+		if len(service.BridgePairToken) < 32 {
+			return errors.New("Remote Bridge Server 配对 Token 无效")
+		}
+	}
+	if service.Type == ServiceBridgeClient {
+		if _, _, err := net.SplitHostPort(service.BridgeRemoteAddr); err != nil {
+			return errors.New("Remote Bridge Client 远端地址必须是 IP:端口")
+		}
+		if len(service.BridgePairToken) < 32 {
+			return errors.New("Remote Bridge Client 必须填写配对 Token")
+		}
+	}
+	if service.AccessMode == AccessRemoteBridge || service.Type == ServiceBridgeClient {
+		if service.BridgeLaneCount < 1 || service.BridgeLaneCount > 32 {
+			return errors.New("Remote Bridge Lane 数量必须在 1 到 32 之间")
+		}
+		if service.BridgeChunkSize < 4*1024 || service.BridgeChunkSize > 4*1024*1024 {
+			return errors.New("Remote Bridge Chunk Size 必须在 4 KB 到 4 MB 之间")
+		}
+	}
 	return nil
+}
+
+// NewPairToken returns a 256-bit pairing secret without creating an import cycle
+// between configuration and the bridge transport implementation.
+func NewPairToken() string {
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err == nil {
+		return hex.EncodeToString(random[:])
+	}
+	return NewID() + NewID()
 }
 
 func NewID() string {

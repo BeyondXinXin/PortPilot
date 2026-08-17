@@ -85,7 +85,7 @@ func (ui *MainWindow) build() error {
 	for _, column := range []struct {
 		title string
 		width int
-	}{{"服务名称", 150}, {"类型", 100}, {"状态", 80}, {"本地地址", 230}, {"访问地址", 300}, {"Access Mode", 120}} {
+	}{{"服务名称", 150}, {"类型", 130}, {"状态", 80}, {"本地地址", 230}, {"访问地址 / 配对码", 300}, {"Access Mode", 120}} {
 		viewColumn := walk.NewTableViewColumn()
 		viewColumn.SetTitle(column.title)
 		viewColumn.SetWidth(column.width)
@@ -371,6 +371,10 @@ func (ui *MainWindow) openSelected(public bool) {
 	}
 	target := selected.Service.LocalAddress
 	if public {
+		if selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient {
+			walk.MsgBox(ui.window, "配对码", "Remote Bridge Server 的“访问地址”是配对码，请使用“复制访问”发送到 Client，而不是在浏览器打开。", walk.MsgBoxIconInformation)
+			return
+		}
 		target = selected.PublicURL
 	}
 	if target == "" {
@@ -392,16 +396,27 @@ func (ui *MainWindow) copySelected(public bool) {
 	if public {
 		target = selected.PublicURL
 		label = "访问地址"
+		if selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient {
+			label = "Remote Bridge 配对码（含敏感 Token）"
+			target = selected.PairingCode
+			if target == "" {
+				walk.MsgBox(ui.window, "配对码不可用", "请先启动 Remote Bridge Server，再复制配对码。", walk.MsgBoxIconWarning)
+				return
+			}
+		}
 	}
 	if target == "" {
 		walk.MsgBox(ui.window, "地址不可用", "服务尚未获得访问地址。", walk.MsgBoxIconWarning)
 		return
 	}
-	if err := walk.Clipboard().SetText(target); err != nil {
+	if err := winutil.CopyText(target); err != nil {
 		walk.MsgBox(ui.window, "复制失败", err.Error(), walk.MsgBoxIconError)
 		return
 	}
 	ui.status.SetText(label + "已复制：" + target)
+	if selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient && public {
+		walk.MsgBox(ui.window, "配对码已复制", "已复制到剪贴板。请到另一台电脑的 PortPilot 中点击“添加”，选择 Remote Bridge 并粘贴该配对码。", walk.MsgBoxIconInformation)
+	}
 }
 
 func (ui *MainWindow) openLog() {

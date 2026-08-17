@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/BeyondXinXin/portpilot/internal/bridge"
 	"github.com/BeyondXinXin/portpilot/internal/config"
 	"github.com/BeyondXinXin/portpilot/internal/direct"
 	"github.com/BeyondXinXin/portpilot/internal/localserver"
@@ -33,6 +34,7 @@ type Snapshot struct {
 	Service        config.Service
 	Status         Status
 	PublicURL      string
+	PairingCode    string
 	AccessMode     config.AccessMode
 	NetworkWarning string
 	TunnelPort     int
@@ -57,11 +59,14 @@ type runtime struct {
 	service        config.Service
 	status         Status
 	publicURL      string
+	pairingCode    string
 	tunnelPort     int
 	lastError      string
 	portOwner      portcheck.Info
 	localServer    *localserver.Server
 	directServer   *direct.Server
+	bridgeServer   *bridge.Server
+	bridgeClient   *bridge.Client
 	accessMode     config.AccessMode
 	networkWarning string
 }
@@ -242,7 +247,7 @@ func (m *Manager) Start(id string) error {
 		if err != nil {
 			return m.fail(state, err)
 		}
-	} else {
+	} else if service.Type == config.ServiceProxy {
 		m.logger.Servicef(id, "检查本地代理服务 %s", service.LocalAddress)
 		if err = localserver.CheckEndpoint(service.LocalAddress, 3*time.Second); err != nil {
 			return m.fail(state, err)
@@ -263,7 +268,10 @@ func (m *Manager) Start(id string) error {
 	m.mu.Lock()
 	state.localServer = local
 	state.directServer = access.directServer
+	state.bridgeServer = access.bridgeServer
+	state.bridgeClient = access.bridgeClient
 	state.publicURL = access.url
+	state.pairingCode = access.pairingCode
 	state.accessMode = access.mode
 	state.networkWarning = access.warning
 	state.tunnelPort = access.tunnelPort
@@ -284,9 +292,42 @@ type accessStart struct {
 	warning      string
 	tunnelPort   int
 	directServer *direct.Server
+	bridgeServer *bridge.Server
+	bridgeClient *bridge.Client
+	pairingCode  string
 }
 
 func (m *Manager) startAccess(serviceID string, service config.Service) (accessStart, error) {
+	if service.AccessMode == config.AccessRemoteBridge && service.Type != config.ServiceBridgeClient {
+		m.mu.RLock()
+		address, available := m.networkInfo.PrimaryTailscale()
+		m.mu.RUnlock()
+		if !available {
+			return accessStart{}, errors.New("Remote Bridge 需要本机已连接 Tailscale，并且具有 100.x 地址")
+		}
+		listen := net.JoinHostPort(address.IP.String(), fmt.Sprintf("%d", service.BridgeListenPort))
+		instance, err := bridge.StartServer(bridge.ServerConfig{
+			ListenAddress: listen, TargetURL: service.LocalAddress, PairToken: service.BridgePairToken,
+			LaneCount: service.BridgeLaneCount, ChunkSize: service.BridgeChunkSize,
+		})
+		if err != nil {
+			return accessStart{}, err
+		}
+		m.logger.Servicef(serviceID, "Remote Bridge Server 已监听 %s，目标 %s，数据 Lane %d", listen, service.LocalAddress, service.BridgeLaneCount)
+		return accessStart{mode: config.AccessRemoteBridge, url: "Remote Bridge Server 已就绪（点击复制访问获取配对码）", pairingCode: bridge.PairingCode(listen, service.BridgePairToken, service.BridgeLaneCount), bridgeServer: instance}, nil
+	}
+	if service.Type == config.ServiceBridgeClient {
+		listen := net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", service.Port))
+		instance, err := bridge.StartClient(bridge.ClientConfig{
+			ListenAddress: listen, RemoteAddress: service.BridgeRemoteAddr, PairToken: service.BridgePairToken,
+			LaneCount: service.BridgeLaneCount, ChunkSize: service.BridgeChunkSize,
+		})
+		if err != nil {
+			return accessStart{}, err
+		}
+		m.logger.Servicef(serviceID, "Remote Bridge Client 本地入口 %s，远端 %s，数据 Lane %d", "http://"+listen, service.BridgeRemoteAddr, service.BridgeLaneCount)
+		return accessStart{mode: config.AccessRemoteBridge, url: "http://" + listen, bridgeClient: instance}, nil
+	}
 	m.mu.RLock()
 	networkState := m.networkInfo
 	networkErr := m.networkErr
@@ -414,6 +455,8 @@ func (m *Manager) Stop(id string) error {
 	service := state.service
 	local := state.localServer
 	directServer := state.directServer
+	bridgeServer := state.bridgeServer
+	bridgeClient := state.bridgeClient
 	accessMode := state.accessMode
 	m.mu.Unlock()
 	m.emit(id)
@@ -442,6 +485,20 @@ func (m *Manager) Stop(id string) error {
 		}
 		cancel()
 	}
+	if bridgeClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := bridgeClient.Stop(ctx); err != nil {
+			failures = append(failures, fmt.Errorf("停止 Remote Bridge Client: %w", err))
+		}
+		cancel()
+	}
+	if bridgeServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := bridgeServer.Stop(ctx); err != nil {
+			failures = append(failures, fmt.Errorf("停止 Remote Bridge Server: %w", err))
+		}
+		cancel()
+	}
 	if local != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := local.Stop(ctx); err != nil {
@@ -453,6 +510,9 @@ func (m *Manager) Stop(id string) error {
 	m.mu.Lock()
 	state.localServer = nil
 	state.directServer = nil
+	state.bridgeServer = nil
+	state.bridgeClient = nil
+	state.pairingCode = ""
 	state.networkWarning = ""
 	state.tunnelPort = 0
 	state.portOwner = portcheck.Info{}
@@ -551,12 +611,20 @@ func (m *Manager) Monitor(ctx context.Context, interval time.Duration) {
 				if snapshot.Service.Type == config.ServiceProxy {
 					healthErr = localserver.CheckEndpoint(snapshot.Service.LocalAddress, 2*time.Second)
 				}
+				if healthErr == nil && snapshot.Service.AccessMode == config.AccessRemoteBridge && snapshot.Service.Type != config.ServiceBridgeClient {
+					healthErr = m.bridgeServerHealthy(snapshot.Service.ID)
+				} else if healthErr == nil && snapshot.Service.Type == config.ServiceBridgeClient {
+					healthErr = m.bridgeClientHealthy(snapshot.Service.ID)
+				}
 				if healthErr == nil {
-					if snapshot.AccessMode == config.AccessFunnel {
+					switch snapshot.AccessMode {
+					case config.AccessFunnel:
 						healthErr = m.tunnel.Healthy(snapshot.Service.ID)
-					} else if snapshot.AccessMode == config.AccessTailscaleServe {
+					case config.AccessTailscaleServe:
 						healthErr = m.tunnel.HealthyServe(snapshot.Service.ID)
-					} else {
+					case config.AccessRemoteBridge:
+						// Remote Bridge has already checked its own listener/client above.
+					default:
 						healthErr = m.directHealthy(snapshot.Service.ID)
 					}
 				}
@@ -578,6 +646,34 @@ func (m *Manager) directHealthy(id string) error {
 	directServer := state.directServer
 	m.mu.RUnlock()
 	return directServer.Healthy()
+}
+
+func (m *Manager) bridgeServerHealthy(id string) error {
+	m.mu.RLock()
+	state, exists := m.runtimes[id]
+	instance := (*bridge.Server)(nil)
+	if exists {
+		instance = state.bridgeServer
+	}
+	m.mu.RUnlock()
+	if instance == nil {
+		return errors.New("Remote Bridge Server 未运行")
+	}
+	return instance.Healthy()
+}
+
+func (m *Manager) bridgeClientHealthy(id string) error {
+	m.mu.RLock()
+	state, exists := m.runtimes[id]
+	instance := (*bridge.Client)(nil)
+	if exists {
+		instance = state.bridgeClient
+	}
+	m.mu.RUnlock()
+	if instance == nil {
+		return errors.New("Remote Bridge Client 未运行")
+	}
+	return instance.Healthy()
 }
 
 func (m *Manager) scheduleRecovery(id string, cause error) {
@@ -643,6 +739,24 @@ func (m *Manager) logNetworkInfo() {
 }
 
 func (m *Manager) applyCandidateLocked(state *runtime) {
+	if state.service.Type == config.ServiceBridgeServer {
+		state.accessMode = config.AccessRemoteBridge
+		state.networkWarning = "仅监听指定的 Tailscale IP；配对码包含敏感 Token，请妥善保存"
+		state.publicURL = "Remote Bridge Server 已就绪（点击复制访问获取配对码）"
+		return
+	}
+	if state.service.AccessMode == config.AccessRemoteBridge {
+		state.accessMode = config.AccessRemoteBridge
+		state.networkWarning = "启动后点击“复制访问”获取配对码；浏览器永远访问 Client 的 localhost"
+		state.publicURL = "Remote Bridge Server（尚未启动）"
+		return
+	}
+	if state.service.Type == config.ServiceBridgeClient {
+		state.accessMode = config.AccessRemoteBridge
+		state.networkWarning = "浏览器始终访问本机 localhost；远端断开时 Client 会自动重连"
+		state.publicURL = state.service.LocalAddress
+		return
+	}
 	mode, address, available := selectAccessMode(state.service.AccessMode, m.networkInfo)
 	state.accessMode = mode
 	state.networkWarning = ""
@@ -697,7 +811,8 @@ func (m *Manager) emit(id string) {
 func snapshotOf(state *runtime) Snapshot {
 	return Snapshot{
 		Service: state.service, Status: state.status, PublicURL: state.publicURL,
-		AccessMode: state.accessMode, NetworkWarning: state.networkWarning,
+		PairingCode: state.pairingCode,
+		AccessMode:  state.accessMode, NetworkWarning: state.networkWarning,
 		TunnelPort: state.tunnelPort, LastError: state.lastError, PortOwner: state.portOwner,
 	}
 }
@@ -712,6 +827,8 @@ func AccessModeLabel(mode config.AccessMode) string {
 		return "Tailscale Serve"
 	case config.AccessFunnel:
 		return "Tailscale Funnel"
+	case config.AccessRemoteBridge:
+		return "Remote Bridge"
 	default:
 		return "Auto"
 	}

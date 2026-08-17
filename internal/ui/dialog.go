@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/BeyondXinXin/portpilot/internal/bridge"
 	"github.com/BeyondXinXin/portpilot/internal/config"
 	"github.com/lxn/walk"
 )
@@ -30,10 +31,13 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	form.SetLayout(grid)
 
 	nameEdit := addLineRow(form, 0, "名称", initial.Name)
-	typeCombo := addComboRow(form, 1, "类型", []string{"静态文件服务", "本地代理服务"})
-	if initial.Type == config.ServiceProxy {
+	typeCombo := addComboRow(form, 1, "类型", []string{"静态文件服务", "本地代理服务", "Remote Bridge"})
+	switch initial.Type {
+	case config.ServiceProxy, config.ServiceBridgeServer:
 		typeCombo.SetCurrentIndex(1)
-	} else {
+	case config.ServiceBridgeClient:
+		typeCombo.SetCurrentIndex(2)
+	default:
 		typeCombo.SetCurrentIndex(0)
 	}
 
@@ -62,6 +66,7 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	portEdit := addLineRow(form, 4, "本地端口", strconv.Itoa(initial.Port))
 	autoStart := addCheckRow(form, 5, "自动启动", initial.AutoStart)
 	autoTerminate := addCheckRow(form, 6, "自动关闭端口占用进程", initial.AutoTerminatePort)
+	pairingCode := addLineRow(form, 7, "配对码", "")
 
 	accessGroup, _ := walk.NewGroupBox(form)
 	accessGroup.SetTitle("Access Mode")
@@ -70,7 +75,7 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	accessLayout.SetSpacing(4)
 	_ = accessLayout.SetAlignment(walk.AlignHNearVCenter)
 	accessGroup.SetLayout(accessLayout)
-	grid.SetRange(accessGroup, walk.Rectangle{X: 0, Y: 7, Width: 2, Height: 1})
+	grid.SetRange(accessGroup, walk.Rectangle{X: 0, Y: 8, Width: 2, Height: 1})
 	autoAccess, _ := walk.NewRadioButton(accessGroup)
 	autoAccess.SetText("Auto（推荐）")
 	ipv6Access, _ := walk.NewRadioButton(accessGroup)
@@ -81,6 +86,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	tailscaleServeAccess.SetText("Tailscale Serve - Tailnet HTTPS（Harness 推荐）")
 	funnelAccess, _ := walk.NewRadioButton(accessGroup)
 	funnelAccess.SetText("Tailscale Funnel - 公网中继")
+	bridgeAccess, _ := walk.NewRadioButton(accessGroup)
+	bridgeAccess.SetText("Remote Bridge - 浏览器始终访问本机 localhost")
 	switch initial.AccessMode {
 	case config.AccessIPv6Direct:
 		ipv6Access.SetChecked(true)
@@ -90,15 +97,23 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		tailscaleServeAccess.SetChecked(true)
 	case config.AccessFunnel:
 		funnelAccess.SetChecked(true)
+	case config.AccessRemoteBridge:
+		bridgeAccess.SetChecked(true)
 	default:
 		autoAccess.SetChecked(true)
 	}
 
 	updateType := func() {
 		isStatic := typeCombo.CurrentIndex() == 0
+		isClient := typeCombo.CurrentIndex() == 2
 		directoryEdit.SetEnabled(isStatic)
 		browseButton.SetEnabled(isStatic)
-		addressEdit.SetReadOnly(isStatic)
+		addressEdit.SetReadOnly(isStatic || isClient)
+		pairingCode.SetEnabled(isClient)
+		bridgeAccess.SetEnabled(!isClient)
+		if isClient {
+			bridgeAccess.SetChecked(true)
+		}
 		if isStatic {
 			port, _ := strconv.Atoi(strings.TrimSpace(portEdit.Text()))
 			if port > 0 {
@@ -108,6 +123,12 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	}
 	typeCombo.CurrentIndexChanged().Attach(updateType)
 	portEdit.TextChanged().Attach(updateType)
+	bridgeAccess.CheckedChanged().Attach(updateType)
+	pairingCode.TextChanged().Attach(func() {
+		if typeCombo.CurrentIndex() == 2 && initial.Type != config.ServiceBridgeClient && strings.TrimSpace(pairingCode.Text()) != "" && strings.TrimSpace(portEdit.Text()) == "8080" {
+			portEdit.SetText("13081")
+		}
+	})
 	updateType()
 
 	buttons, _ := walk.NewComposite(dialog)
@@ -133,22 +154,47 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		serviceType := config.ServiceStatic
 		if typeCombo.CurrentIndex() == 1 {
 			serviceType = config.ServiceProxy
+		} else if typeCombo.CurrentIndex() == 2 {
+			serviceType = config.ServiceBridgeClient
 		}
 		accessMode := config.AccessAuto
-		switch {
-		case ipv6Access.Checked():
-			accessMode = config.AccessIPv6Direct
-		case tailscaleAccess.Checked():
-			accessMode = config.AccessTailscaleDirect
-		case tailscaleServeAccess.Checked():
-			accessMode = config.AccessTailscaleServe
-		case funnelAccess.Checked():
-			accessMode = config.AccessFunnel
+		if bridgeAccess.Checked() {
+			accessMode = config.AccessRemoteBridge
+		}
+		remoteAddress, pairToken, lanes := "", "", 0
+		if serviceType == config.ServiceBridgeClient && strings.TrimSpace(pairingCode.Text()) != "" {
+			parsedRemote, parsedToken, parsedLanes, pairingErr := bridge.ParsePairingCode(pairingCode.Text())
+			if pairingErr != nil {
+				walk.MsgBox(dialog, "配置错误", pairingErr.Error(), walk.MsgBoxIconError)
+				return
+			}
+			remoteAddress, pairToken, lanes = parsedRemote, parsedToken, parsedLanes
+			serviceType = config.ServiceBridgeClient
+		} else if initial.Type == config.ServiceBridgeClient && serviceType == config.ServiceBridgeClient {
+			serviceType = config.ServiceBridgeClient
+			remoteAddress, pairToken, lanes = initial.BridgeRemoteAddr, initial.BridgePairToken, initial.BridgeLaneCount
+		}
+		if serviceType == config.ServiceBridgeClient && remoteAddress == "" {
+			walk.MsgBox(dialog, "配置错误", "Remote Bridge Client 必须粘贴配对码。", walk.MsgBoxIconError)
+			return
+		}
+		if accessMode != config.AccessRemoteBridge {
+			switch {
+			case ipv6Access.Checked():
+				accessMode = config.AccessIPv6Direct
+			case tailscaleAccess.Checked():
+				accessMode = config.AccessTailscaleDirect
+			case tailscaleServeAccess.Checked():
+				accessMode = config.AccessTailscaleServe
+			case funnelAccess.Checked():
+				accessMode = config.AccessFunnel
+			}
 		}
 		result = config.NormalizeService(config.Service{
 			ID: initial.ID, Name: nameEdit.Text(), Type: serviceType,
 			Directory: directoryEdit.Text(), LocalAddress: addressEdit.Text(), Port: port, AccessMode: accessMode,
 			AutoStart: autoStart.Checked(), AutoTerminatePort: autoTerminate.Checked(),
+			BridgeRemoteAddr: remoteAddress, BridgePairToken: pairToken, BridgeLaneCount: lanes,
 		})
 		if result.Type == config.ServiceProxy && result.Port == 0 {
 			if parsed, parseURLerr := url.Parse(result.LocalAddress); parseURLerr == nil {
@@ -164,8 +210,8 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		dialog.Accept()
 	})
 
-	dialog.SetMinMaxSize(walk.Size{Width: 400, Height: 560}, walk.Size{})
-	dialog.SetSize(walk.Size{Width: 400, Height: 560})
+	dialog.SetMinMaxSize(walk.Size{Width: 460, Height: 570}, walk.Size{})
+	dialog.SetSize(walk.Size{Width: 460, Height: 570})
 	if dialog.Run() != int(walk.DlgCmdOK) {
 		return config.Service{}, false
 	}
