@@ -12,6 +12,7 @@ import (
 	"github.com/BeyondXinXin/portpilot/internal/manager"
 	"github.com/BeyondXinXin/portpilot/internal/portcheck"
 	"github.com/BeyondXinXin/portpilot/internal/runlog"
+	"github.com/BeyondXinXin/portpilot/internal/version"
 	"github.com/BeyondXinXin/portpilot/internal/winutil"
 	"github.com/lxn/walk"
 )
@@ -143,7 +144,7 @@ func (ui *MainWindow) buildTray() error {
 		_ = tray.SetIcon(icon)
 		_ = ui.window.SetIcon(icon)
 	}
-	tray.SetToolTip("PortPilot")
+	tray.SetToolTip(fmt.Sprintf("PortPilot %s", version.Display()))
 	ui.addTrayAction("打开管理界面", ui.show)
 	ui.addTrayAction("启动全部服务", ui.startAll)
 	ui.addTrayAction("停止全部服务", ui.stopAll)

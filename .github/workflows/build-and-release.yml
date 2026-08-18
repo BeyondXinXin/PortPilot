@@ -1,0 +1,87 @@
+# Build and release:
+# - Push a valid v* semantic-version tag to publish a GitHub Release.
+# - Run workflow_dispatch to build and upload an artifact only.
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Determine and validate build version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME
+            $semver = '^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+            if ($version -notmatch $semver) {
+              throw "Release tag '$version' must be a semantic version such as v1.2.3."
+            }
+          } else {
+            $version = "dev-$(git rev-parse --short=7 HEAD)"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "asset-name=PortPilot-$version-windows-amd64.exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Building PortPilot $version"
+
+      - name: Run tests
+        shell: pwsh
+        run: go test ./...
+
+      - name: Build Windows x64 executable
+        shell: cmd
+        env:
+          PORTPILOT_VERSION: ${{ steps.version.outputs.version }}
+        run: build.cmd
+
+      - name: Name release assets and generate SHA-256
+        id: assets
+        shell: pwsh
+        env:
+          ASSET_NAME: ${{ steps.version.outputs.asset-name }}
+        run: |
+          Move-Item -LiteralPath .\PortPilot.exe -Destination $env:ASSET_NAME
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:ASSET_NAME).Hash.ToLowerInvariant()
+          "$hash *$env:ASSET_NAME" | Out-File -FilePath "$env:ASSET_NAME.sha256" -Encoding ascii
+          "sha256-name=$env:ASSET_NAME.sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortPilot-${{ steps.version.outputs.version }}-windows-amd64
+          path: |
+            ${{ steps.version.outputs.asset-name }}
+            ${{ steps.assets.outputs.sha256-name }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.version.outputs.asset-name }}
+            ${{ steps.assets.outputs.sha256-name }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Windows x64 single-file build. Verify the download with the accompanying SHA-256 file.

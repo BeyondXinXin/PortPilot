@@ -14,6 +14,7 @@ import (
 	"github.com/BeyondXinXin/portpilot/internal/runlog"
 	"github.com/BeyondXinXin/portpilot/internal/tunnel"
 	"github.com/BeyondXinXin/portpilot/internal/ui"
+	"github.com/BeyondXinXin/portpilot/internal/version"
 	"github.com/BeyondXinXin/portpilot/internal/winutil"
 	"github.com/lxn/walk"
 )
@@ -57,7 +58,7 @@ func Main() {
 		return
 	}
 	defer logger.Close()
-	logger.Printf("PortPilot 启动")
+	logger.Printf("PortPilot %s 启动", version.Display())
 
 	tunnelManager := tunnel.New(cfg.TailscalePath)
 	serviceManager := manager.New(cfg.Services, tunnelManager, logger)
