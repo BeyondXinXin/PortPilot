@@ -283,7 +283,7 @@ func (ui *MainWindow) updateTableMenu(selected manager.Snapshot, ok bool) {
 }
 
 func (ui *MainWindow) addService() {
-	service, ok := editService(ui.window, config.Service{ID: config.NewID(), Type: config.ServiceStatic, Port: 8080})
+	service, ok := newService(ui.window, config.Service{ID: config.NewID(), Type: config.ServiceStatic, Port: 8080})
 	if !ok {
 		return
 	}
@@ -300,7 +300,7 @@ func (ui *MainWindow) editSelected() {
 		walk.MsgBox(ui.window, "无法编辑", "请先停止服务。", walk.MsgBoxIconWarning)
 		return
 	}
-	service, accepted := editService(ui.window, selected.Service)
+	service, accepted := editService(ui.window, selected.Service, ui.dialogActions(selected))
 	if !accepted {
 		return
 	}
@@ -323,24 +323,36 @@ func (ui *MainWindow) activateSelected() {
 		ui.editSelected()
 		return
 	}
+	viewService(ui.window, selected.Service, ui.dialogActions(selected))
+}
+
+func (ui *MainWindow) dialogActions(selected manager.Snapshot) serviceDialogActions {
+	actions := serviceDialogActions{
+		openLocal:       func() { ui.openSelected(false) },
+		copyAccessLabel: "复制访问",
+		copyAccess:      func() { ui.copySelected(true) },
+	}
 	isBridgeServer := selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient
-	copyAccessLabel := "复制访问"
 	if isBridgeServer {
-		copyAccessLabel = "复制配对码"
+		actions.openAccess = nil
+		actions.copyAccessLabel = "复制配对码"
+	} else {
+		actions.openAccess = func() { ui.openSelected(true) }
 	}
-	serviceActionLabel := "启动"
-	serviceAction := func() { ui.runSelected("start") }
+	if selected.Status == manager.StatusRunning {
+		actions.accessActionsVisible = true
+	}
+	actions.serviceActionLabel = "启动"
+	actions.serviceActionNextLabel = "停止"
+	actions.serviceAction = func(done func(error)) { ui.runSelectedWithCallback("start", done) }
+	actions.serviceActionNext = func(done func(error)) { ui.runSelectedWithCallback("stop", done) }
 	if selected.Status != manager.StatusStopped {
-		serviceActionLabel = "停止"
-		serviceAction = func() { ui.runSelected("stop") }
+		actions.serviceActionLabel = "停止"
+		actions.serviceActionNextLabel = "启动"
+		actions.serviceAction = func(done func(error)) { ui.runSelectedWithCallback("stop", done) }
+		actions.serviceActionNext = func(done func(error)) { ui.runSelectedWithCallback("start", done) }
 	}
-	viewService(ui.window, selected.Service, serviceDialogActions{
-		openLocal:          func() { ui.openSelected(false) },
-		copyAccessLabel:    copyAccessLabel,
-		copyAccess:         func() { ui.copySelected(true) },
-		serviceActionLabel: serviceActionLabel,
-		serviceAction:      serviceAction,
-	})
+	return actions
 }
 
 func (ui *MainWindow) deleteSelected() {
@@ -381,6 +393,10 @@ func (ui *MainWindow) applyServices(services []config.Service) {
 }
 
 func (ui *MainWindow) runSelected(operation string) {
+	ui.runSelectedWithCallback(operation, nil)
+}
+
+func (ui *MainWindow) runSelectedWithCallback(operation string, completed func(error)) {
 	selected, ok := ui.selected()
 	if !ok {
 		return
@@ -396,7 +412,12 @@ func (ui *MainWindow) runSelected(operation string) {
 		default:
 			err = ui.manager.Start(selected.Service.ID)
 		}
-		ui.window.Synchronize(func() { ui.handleOperationError(selected.Service.ID, operation, err) })
+		ui.window.Synchronize(func() {
+			ui.handleOperationError(selected.Service.ID, operation, err)
+			if completed != nil {
+				completed(err)
+			}
+		})
 	}()
 }
 

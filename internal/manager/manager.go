@@ -314,7 +314,7 @@ func (m *Manager) startAccess(serviceID string, service config.Service) (accessS
 			return accessStart{}, err
 		}
 		m.logger.Servicef(serviceID, "Remote Bridge Server 已监听 %s，目标 %s，数据 Lane %d", listen, service.LocalAddress, service.BridgeLaneCount)
-		return accessStart{mode: config.AccessRemoteBridge, url: "配对码（点击复制）", pairingCode: bridge.PairingCode(listen, service.BridgePairToken, service.BridgeLaneCount), bridgeServer: instance}, nil
+		return accessStart{mode: config.AccessRemoteBridge, url: "配对码", pairingCode: bridge.PairingCode(listen, service.BridgePairToken, service.BridgeLaneCount), bridgeServer: instance}, nil
 	}
 	if service.Type == config.ServiceBridgeClient {
 		listen := net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", service.Port))
@@ -742,7 +742,7 @@ func (m *Manager) applyCandidateLocked(state *runtime) {
 	if state.service.Type == config.ServiceBridgeServer {
 		state.accessMode = config.AccessRemoteBridge
 		state.networkWarning = "仅监听指定的 Tailscale IP；配对码包含敏感 Token，请妥善保存"
-		state.publicURL = "配对码（点击复制）"
+		state.publicURL = "配对码"
 		return
 	}
 	if state.service.AccessMode == config.AccessRemoteBridge {

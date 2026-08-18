@@ -10,16 +10,24 @@ import (
 	"github.com/lxn/walk"
 )
 
-func editService(owner walk.Form, initial config.Service) (config.Service, bool) {
+func newService(owner walk.Form, initial config.Service) (config.Service, bool) {
 	return serviceDialog(owner, initial, false, serviceDialogActions{})
 }
 
+func editService(owner walk.Form, initial config.Service, actions serviceDialogActions) (config.Service, bool) {
+	return serviceDialog(owner, initial, false, actions)
+}
+
 type serviceDialogActions struct {
-	openLocal          func()
-	copyAccessLabel    string
-	copyAccess         func()
-	serviceActionLabel string
-	serviceAction      func()
+	openLocal              func()
+	openAccess             func()
+	copyAccessLabel        string
+	copyAccess             func()
+	accessActionsVisible   bool
+	serviceActionLabel     string
+	serviceActionNextLabel string
+	serviceAction          func(func(error))
+	serviceActionNext      func(func(error))
 }
 
 func viewService(owner walk.Form, initial config.Service, actions serviceDialogActions) {
@@ -136,64 +144,82 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 	}
 	typeCombo.CurrentIndexChanged().Attach(updateType)
 	updateType()
-	if readOnly {
-		typeCombo.SetEnabled(false)
-		nameEdit.SetReadOnly(true)
-		directoryEdit.SetReadOnly(true)
-		browseButton.SetEnabled(false)
-		staticPort.SetReadOnly(true)
-		staticTerminate.SetEnabled(false)
-		addressEdit.SetReadOnly(true)
-		proxyPort.SetReadOnly(true)
-		proxyTerminate.SetEnabled(false)
-		bridgePort.SetReadOnly(true)
-		pairingCode.SetReadOnly(true)
-		autoStart.SetEnabled(false)
-		ipv6Access.SetEnabled(false)
-		tailscaleAccess.SetEnabled(false)
-		tailscaleServeAccess.SetEnabled(false)
-		funnelAccess.SetEnabled(false)
-		bridgeAccess.SetEnabled(false)
-	}
-
 	_, _ = walk.NewVSpacer(dialog)
 	buttons, _ := walk.NewComposite(dialog)
 	buttonLayout := walk.NewHBoxLayout()
 	buttonLayout.SetMargins(walk.Margins{})
 	buttonLayout.SetSpacing(8)
 	buttons.SetLayout(buttonLayout)
-	if readOnly {
-		addServiceDialogAction(buttons, "打开本地", func() {
-			dialog.Cancel()
-			if actions.openLocal != nil {
-				actions.openLocal()
-			}
+	var setReadOnly func(bool)
+	accessActionButtons := make([]*walk.PushButton, 0, 3)
+	if actions.openLocal != nil {
+		accessActionButtons = append(accessActionButtons, addServiceDialogAction(buttons, "打开本地", actions.openLocal))
+	}
+	if actions.openAccess != nil {
+		accessActionButtons = append(accessActionButtons, addServiceDialogAction(buttons, "打开访问", actions.openAccess))
+	}
+	if actions.copyAccess != nil {
+		accessActionButtons = append(accessActionButtons, addServiceDialogAction(buttons, actions.copyAccessLabel, actions.copyAccess))
+	}
+	setAccessActionsVisible := func(visible bool) {
+		for _, button := range accessActionButtons {
+			button.SetVisible(visible)
+		}
+	}
+	var serviceActionButton *walk.PushButton
+	if actions.serviceAction != nil {
+		currentAction := actions.serviceAction
+		nextAction := actions.serviceActionNext
+		currentLabel := actions.serviceActionLabel
+		nextLabel := actions.serviceActionNextLabel
+		serviceActionButton = addServiceDialogAction(buttons, actions.serviceActionLabel, func() {
+			serviceActionButton.SetEnabled(false)
+			currentAction(func(operationErr error) {
+				serviceActionButton.SetEnabled(true)
+				if operationErr != nil {
+					return
+				}
+				currentAction, nextAction = nextAction, currentAction
+				currentLabel, nextLabel = nextLabel, currentLabel
+				serviceActionButton.SetText(currentLabel)
+				setReadOnly(currentLabel == "停止")
+				setAccessActionsVisible(currentLabel == "停止")
+			})
 		})
-		if actions.copyAccess != nil {
-			addServiceDialogAction(buttons, actions.copyAccessLabel, func() {
-				dialog.Cancel()
-				actions.copyAccess()
-			})
-		}
-		if actions.serviceAction != nil {
-			addServiceDialogAction(buttons, actions.serviceActionLabel, func() {
-				dialog.Cancel()
-				actions.serviceAction()
-			})
-		}
 	}
 	spacer, _ := walk.NewHSpacer(buttons)
 	_ = spacer
 	saveButton, _ := walk.NewPushButton(buttons)
 	saveButton.SetText("保存")
 	cancelButton, _ := walk.NewPushButton(buttons)
-	if readOnly {
-		saveButton.SetVisible(false)
-		cancelButton.SetText("关闭")
-	} else {
-		cancelButton.SetText("取消")
-	}
 	cancelButton.Clicked().Attach(dialog.Cancel)
+	setReadOnly = func(value bool) {
+		typeCombo.SetEnabled(!value)
+		nameEdit.SetReadOnly(value)
+		directoryEdit.SetReadOnly(value)
+		browseButton.SetEnabled(!value)
+		staticPort.SetReadOnly(value)
+		staticTerminate.SetEnabled(!value)
+		addressEdit.SetReadOnly(value)
+		proxyPort.SetReadOnly(value)
+		proxyTerminate.SetEnabled(!value)
+		bridgePort.SetReadOnly(value)
+		pairingCode.SetReadOnly(value)
+		autoStart.SetEnabled(!value)
+		ipv6Access.SetEnabled(!value)
+		tailscaleAccess.SetEnabled(!value)
+		tailscaleServeAccess.SetEnabled(!value)
+		funnelAccess.SetEnabled(!value)
+		bridgeAccess.SetEnabled(!value)
+		saveButton.SetVisible(!value)
+		if value {
+			cancelButton.SetText("关闭")
+		} else {
+			cancelButton.SetText("取消")
+		}
+	}
+	setReadOnly(readOnly)
+	setAccessActionsVisible(actions.accessActionsVisible)
 
 	result := initial
 	saveButton.Clicked().Attach(func() {
@@ -334,10 +360,11 @@ func addDialogCheck(parent walk.Container, text string, checked bool) *walk.Chec
 	return check
 }
 
-func addServiceDialogAction(parent walk.Container, text string, handler func()) {
+func addServiceDialogAction(parent walk.Container, text string, handler func()) *walk.PushButton {
 	button, _ := walk.NewPushButton(parent)
 	button.SetText(text)
 	button.Clicked().Attach(handler)
+	return button
 }
 
 func servicePort(service config.Service, fallback int) string {
