@@ -1,5 +1,6 @@
 PortPilot.exe
 PortPilot.exe~
+*.syso
 dist/
 *.log
 .tools/

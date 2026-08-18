@@ -319,11 +319,24 @@ func (ui *MainWindow) activateSelected() {
 	if !ok {
 		return
 	}
-	if selected.Status == manager.StatusRunning {
-		viewService(ui.window, selected.Service)
-		return
+	isBridgeServer := selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient
+	copyAccessLabel := "复制访问"
+	if isBridgeServer {
+		copyAccessLabel = "复制配对码"
 	}
-	ui.editSelected()
+	serviceActionLabel := "启动"
+	serviceAction := func() { ui.runSelected("start") }
+	if selected.Status != manager.StatusStopped {
+		serviceActionLabel = "停止"
+		serviceAction = func() { ui.runSelected("stop") }
+	}
+	viewService(ui.window, selected.Service, serviceDialogActions{
+		openLocal:          func() { ui.openSelected(false) },
+		copyAccessLabel:    copyAccessLabel,
+		copyAccess:         func() { ui.copySelected(true) },
+		serviceActionLabel: serviceActionLabel,
+		serviceAction:      serviceAction,
+	})
 }
 
 func (ui *MainWindow) deleteSelected() {

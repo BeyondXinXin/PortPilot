@@ -11,14 +11,22 @@ import (
 )
 
 func editService(owner walk.Form, initial config.Service) (config.Service, bool) {
-	return serviceDialog(owner, initial, false)
+	return serviceDialog(owner, initial, false, serviceDialogActions{})
 }
 
-func viewService(owner walk.Form, initial config.Service) {
-	_, _ = serviceDialog(owner, initial, true)
+type serviceDialogActions struct {
+	openLocal          func()
+	copyAccessLabel    string
+	copyAccess         func()
+	serviceActionLabel string
+	serviceAction      func()
 }
 
-func serviceDialog(owner walk.Form, initial config.Service, readOnly bool) (config.Service, bool) {
+func viewService(owner walk.Form, initial config.Service, actions serviceDialogActions) {
+	_, _ = serviceDialog(owner, initial, true, actions)
+}
+
+func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actions serviceDialogActions) (config.Service, bool) {
 	dialog, err := walk.NewDialog(owner)
 	if err != nil {
 		return config.Service{}, false
@@ -92,11 +100,11 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool) (conf
 	tailscaleAccess, _ := walk.NewRadioButton(accessGroup)
 	tailscaleAccess.SetText("Tailscale Direct - Tailnet 私网")
 	tailscaleServeAccess, _ := walk.NewRadioButton(accessGroup)
-	tailscaleServeAccess.SetText("Tailscale Serve - Tailnet HTTPS（Harness 推荐）")
+	tailscaleServeAccess.SetText("Tailscale Serve - Tailnet HTTPS")
 	funnelAccess, _ := walk.NewRadioButton(accessGroup)
 	funnelAccess.SetText("Tailscale Funnel - 公网中继")
 	bridgeAccess, _ := walk.NewRadioButton(accessGroup)
-	bridgeAccess.SetText("Remote Bridge - 浏览器始终访问本机 localhost")
+	bridgeAccess.SetText("Remote Bridge - Harness 推荐，本机 localhost")
 	switch initial.AccessMode {
 	case config.AccessIPv6Direct:
 		ipv6Access.SetChecked(true)
@@ -154,6 +162,26 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool) (conf
 	buttonLayout.SetMargins(walk.Margins{})
 	buttonLayout.SetSpacing(8)
 	buttons.SetLayout(buttonLayout)
+	if readOnly {
+		addServiceDialogAction(buttons, "打开本地", func() {
+			dialog.Cancel()
+			if actions.openLocal != nil {
+				actions.openLocal()
+			}
+		})
+		if actions.copyAccess != nil {
+			addServiceDialogAction(buttons, actions.copyAccessLabel, func() {
+				dialog.Cancel()
+				actions.copyAccess()
+			})
+		}
+		if actions.serviceAction != nil {
+			addServiceDialogAction(buttons, actions.serviceActionLabel, func() {
+				dialog.Cancel()
+				actions.serviceAction()
+			})
+		}
+	}
 	spacer, _ := walk.NewHSpacer(buttons)
 	_ = spacer
 	saveButton, _ := walk.NewPushButton(buttons)
@@ -304,6 +332,12 @@ func addDialogCheck(parent walk.Container, text string, checked bool) *walk.Chec
 	check.SetText(text)
 	check.SetChecked(checked)
 	return check
+}
+
+func addServiceDialogAction(parent walk.Container, text string, handler func()) {
+	button, _ := walk.NewPushButton(parent)
+	button.SetText(text)
+	button.Clicked().Attach(handler)
 }
 
 func servicePort(service config.Service, fallback int) string {
