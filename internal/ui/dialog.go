@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -12,46 +11,52 @@ import (
 )
 
 func editService(owner walk.Form, initial config.Service) (config.Service, bool) {
+	return serviceDialog(owner, initial, false)
+}
+
+func viewService(owner walk.Form, initial config.Service) {
+	_, _ = serviceDialog(owner, initial, true)
+}
+
+func serviceDialog(owner walk.Form, initial config.Service, readOnly bool) (config.Service, bool) {
 	dialog, err := walk.NewDialog(owner)
 	if err != nil {
 		return config.Service{}, false
 	}
 	defer dialog.Dispose()
-	dialog.SetTitle("服务配置")
+	if readOnly {
+		dialog.SetTitle("服务配置（只读）")
+	} else {
+		dialog.SetTitle("服务配置")
+	}
 	layout := walk.NewVBoxLayout()
 	layout.SetMargins(walk.Margins{HNear: 14, VNear: 14, HFar: 14, VFar: 14})
 	layout.SetSpacing(10)
 	dialog.SetLayout(layout)
 
 	form, _ := walk.NewComposite(dialog)
-	grid := walk.NewGridLayout()
-	grid.SetMargins(walk.Margins{})
-	grid.SetSpacing(8)
-	grid.SetColumnStretchFactor(1, 1)
-	form.SetLayout(grid)
+	formLayout := walk.NewVBoxLayout()
+	formLayout.SetMargins(walk.Margins{})
+	formLayout.SetSpacing(8)
+	_ = formLayout.SetAlignment(walk.AlignHNearVNear)
+	form.SetLayout(formLayout)
 
-	nameEdit := addLineRow(form, 0, "名称", initial.Name)
-	typeCombo := addComboRow(form, 1, "类型", []string{"静态文件服务", "本地代理服务", "Remote Bridge"})
+	typeCombo := addDialogCombo(form, "类型", []string{"Remote Bridge", "静态文件服务", "本地代理服务"})
 	switch initial.Type {
-	case config.ServiceProxy, config.ServiceBridgeServer:
-		typeCombo.SetCurrentIndex(1)
 	case config.ServiceBridgeClient:
+		typeCombo.SetCurrentIndex(0)
+	case config.ServiceProxy, config.ServiceBridgeServer:
 		typeCombo.SetCurrentIndex(2)
 	default:
-		typeCombo.SetCurrentIndex(0)
+		typeCombo.SetCurrentIndex(1)
 	}
+	nameEdit := addDialogLine(form, "名称", initial.Name)
 
-	directoryLabel, _ := walk.NewLabel(form)
-	directoryLabel.SetText("目录")
-	grid.SetRange(directoryLabel, walk.Rectangle{X: 0, Y: 2, Width: 1, Height: 1})
-	directoryRow, _ := walk.NewComposite(form)
-	directoryLayout := walk.NewHBoxLayout()
-	directoryLayout.SetMargins(walk.Margins{})
-	directoryLayout.SetSpacing(6)
-	directoryRow.SetLayout(directoryLayout)
-	grid.SetRange(directoryRow, walk.Rectangle{X: 1, Y: 2, Width: 1, Height: 1})
+	staticSection := newDialogSection(form)
+	directoryRow := addDialogRow(staticSection, "目录")
 	directoryEdit, _ := walk.NewLineEdit(directoryRow)
 	directoryEdit.SetText(initial.Directory)
+	directoryRow.Layout().(*walk.BoxLayout).SetStretchFactor(directoryEdit, 1)
 	browseButton, _ := walk.NewPushButton(directoryRow)
 	browseButton.SetText("浏览...")
 	browseButton.Clicked().Attach(func() {
@@ -62,12 +67,19 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		}
 	})
 
-	addressEdit := addLineRow(form, 3, "本地地址", initial.LocalAddress)
-	portEdit := addLineRow(form, 4, "本地端口", strconv.Itoa(initial.Port))
-	autoStart := addCheckRow(form, 5, "自动启动", initial.AutoStart)
-	autoTerminate := addCheckRow(form, 6, "自动关闭端口占用进程", initial.AutoTerminatePort)
-	pairingCode := addLineRow(form, 7, "配对码", "")
+	staticPortLabel, staticPort := addDialogLabeledLine(staticSection, "服务端口", servicePort(initial, 8080))
+	staticTerminate := addDialogCheck(staticSection, "自动关闭端口占用进程", initial.AutoTerminatePort)
 
+	proxySection := newDialogSection(form)
+	addressEdit := addDialogLine(proxySection, "本地地址", initial.LocalAddress)
+	proxyPortLabel, proxyPort := addDialogLabeledLine(proxySection, "代理入口端口", servicePort(initial, 8080))
+	proxyTerminate := addDialogCheck(proxySection, "自动关闭端口占用进程", initial.AutoTerminatePort)
+
+	bridgeSection := newDialogSection(form)
+	bridgePortLabel, bridgePort := addDialogLabeledLine(bridgeSection, "本机入口端口", servicePort(initial, 13081))
+	pairingCode := addDialogLine(bridgeSection, "配对码", "")
+
+	autoStart := addDialogCheck(form, "自动启动", initial.AutoStart)
 	accessGroup, _ := walk.NewGroupBox(form)
 	accessGroup.SetTitle("Access Mode")
 	accessLayout := walk.NewVBoxLayout()
@@ -75,9 +87,6 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	accessLayout.SetSpacing(4)
 	_ = accessLayout.SetAlignment(walk.AlignHNearVCenter)
 	accessGroup.SetLayout(accessLayout)
-	grid.SetRange(accessGroup, walk.Rectangle{X: 0, Y: 8, Width: 2, Height: 1})
-	autoAccess, _ := walk.NewRadioButton(accessGroup)
-	autoAccess.SetText("Auto（推荐）")
 	ipv6Access, _ := walk.NewRadioButton(accessGroup)
 	ipv6Access.SetText("IPv6 Direct - 最快，公网直连")
 	tailscaleAccess, _ := walk.NewRadioButton(accessGroup)
@@ -100,37 +109,46 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	case config.AccessRemoteBridge:
 		bridgeAccess.SetChecked(true)
 	default:
-		autoAccess.SetChecked(true)
+		tailscaleAccess.SetChecked(true)
 	}
 
 	updateType := func() {
-		isStatic := typeCombo.CurrentIndex() == 0
-		isClient := typeCombo.CurrentIndex() == 2
-		directoryEdit.SetEnabled(isStatic)
-		browseButton.SetEnabled(isStatic)
-		addressEdit.SetReadOnly(isStatic || isClient)
-		pairingCode.SetEnabled(isClient)
-		bridgeAccess.SetEnabled(!isClient)
-		if isClient {
-			bridgeAccess.SetChecked(true)
-		}
-		if isStatic {
-			port, _ := strconv.Atoi(strings.TrimSpace(portEdit.Text()))
-			if port > 0 {
-				addressEdit.SetText(fmt.Sprintf("http://127.0.0.1:%d", port))
-			}
+		isBridge := typeCombo.CurrentIndex() == 0
+		isStatic := typeCombo.CurrentIndex() == 1
+		staticPortLabel.SetText("服务端口")
+		proxyPortLabel.SetText("代理入口端口")
+		bridgePortLabel.SetText("本机入口端口")
+		bridgeSection.SetVisible(isBridge)
+		staticSection.SetVisible(isStatic)
+		proxySection.SetVisible(!isBridge && !isStatic)
+		accessGroup.SetVisible(!isBridge)
+		if isBridge && initial.Type != config.ServiceBridgeClient && strings.TrimSpace(bridgePort.Text()) == "8080" {
+			bridgePort.SetText("13081")
 		}
 	}
 	typeCombo.CurrentIndexChanged().Attach(updateType)
-	portEdit.TextChanged().Attach(updateType)
-	bridgeAccess.CheckedChanged().Attach(updateType)
-	pairingCode.TextChanged().Attach(func() {
-		if typeCombo.CurrentIndex() == 2 && initial.Type != config.ServiceBridgeClient && strings.TrimSpace(pairingCode.Text()) != "" && strings.TrimSpace(portEdit.Text()) == "8080" {
-			portEdit.SetText("13081")
-		}
-	})
 	updateType()
+	if readOnly {
+		typeCombo.SetEnabled(false)
+		nameEdit.SetReadOnly(true)
+		directoryEdit.SetReadOnly(true)
+		browseButton.SetEnabled(false)
+		staticPort.SetReadOnly(true)
+		staticTerminate.SetEnabled(false)
+		addressEdit.SetReadOnly(true)
+		proxyPort.SetReadOnly(true)
+		proxyTerminate.SetEnabled(false)
+		bridgePort.SetReadOnly(true)
+		pairingCode.SetReadOnly(true)
+		autoStart.SetEnabled(false)
+		ipv6Access.SetEnabled(false)
+		tailscaleAccess.SetEnabled(false)
+		tailscaleServeAccess.SetEnabled(false)
+		funnelAccess.SetEnabled(false)
+		bridgeAccess.SetEnabled(false)
+	}
 
+	_, _ = walk.NewVSpacer(dialog)
 	buttons, _ := walk.NewComposite(dialog)
 	buttonLayout := walk.NewHBoxLayout()
 	buttonLayout.SetMargins(walk.Margins{})
@@ -141,26 +159,31 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 	saveButton, _ := walk.NewPushButton(buttons)
 	saveButton.SetText("保存")
 	cancelButton, _ := walk.NewPushButton(buttons)
-	cancelButton.SetText("取消")
+	if readOnly {
+		saveButton.SetVisible(false)
+		cancelButton.SetText("关闭")
+	} else {
+		cancelButton.SetText("取消")
+	}
 	cancelButton.Clicked().Attach(dialog.Cancel)
 
 	result := initial
 	saveButton.Clicked().Attach(func() {
-		port, parseErr := strconv.Atoi(strings.TrimSpace(portEdit.Text()))
+		serviceType := config.ServiceBridgeClient
+		portText := bridgePort.Text()
+		if typeCombo.CurrentIndex() == 1 {
+			serviceType = config.ServiceStatic
+			portText = staticPort.Text()
+		} else if typeCombo.CurrentIndex() == 2 {
+			serviceType = config.ServiceProxy
+			portText = proxyPort.Text()
+		}
+		port, parseErr := strconv.Atoi(strings.TrimSpace(portText))
 		if parseErr != nil {
 			walk.MsgBox(dialog, "配置错误", "本地端口必须是数字。", walk.MsgBoxIconError)
 			return
 		}
-		serviceType := config.ServiceStatic
-		if typeCombo.CurrentIndex() == 1 {
-			serviceType = config.ServiceProxy
-		} else if typeCombo.CurrentIndex() == 2 {
-			serviceType = config.ServiceBridgeClient
-		}
-		accessMode := config.AccessAuto
-		if bridgeAccess.Checked() {
-			accessMode = config.AccessRemoteBridge
-		}
+		accessMode := config.AccessRemoteBridge
 		remoteAddress, pairToken, lanes := "", "", 0
 		if serviceType == config.ServiceBridgeClient && strings.TrimSpace(pairingCode.Text()) != "" {
 			parsedRemote, parsedToken, parsedLanes, pairingErr := bridge.ParsePairingCode(pairingCode.Text())
@@ -178,7 +201,7 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 			walk.MsgBox(dialog, "配置错误", "Remote Bridge Client 必须粘贴配对码。", walk.MsgBoxIconError)
 			return
 		}
-		if accessMode != config.AccessRemoteBridge {
+		if serviceType != config.ServiceBridgeClient {
 			switch {
 			case ipv6Access.Checked():
 				accessMode = config.AccessIPv6Direct
@@ -188,12 +211,22 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 				accessMode = config.AccessTailscaleServe
 			case funnelAccess.Checked():
 				accessMode = config.AccessFunnel
+			case bridgeAccess.Checked():
+				accessMode = config.AccessRemoteBridge
 			}
+		}
+		directory := ""
+		localAddress := ""
+		autoTerminate := false
+		if serviceType == config.ServiceStatic {
+			directory, autoTerminate = directoryEdit.Text(), staticTerminate.Checked()
+		} else if serviceType == config.ServiceProxy {
+			localAddress, autoTerminate = addressEdit.Text(), proxyTerminate.Checked()
 		}
 		result = config.NormalizeService(config.Service{
 			ID: initial.ID, Name: nameEdit.Text(), Type: serviceType,
-			Directory: directoryEdit.Text(), LocalAddress: addressEdit.Text(), Port: port, AccessMode: accessMode,
-			AutoStart: autoStart.Checked(), AutoTerminatePort: autoTerminate.Checked(),
+			Directory: directory, LocalAddress: localAddress, Port: port, AccessMode: accessMode,
+			AutoStart: autoStart.Checked(), AutoTerminatePort: autoTerminate,
 			BridgeRemoteAddr: remoteAddress, BridgePairToken: pairToken, BridgeLaneCount: lanes,
 		})
 		if result.Type == config.ServiceProxy && result.Port == 0 {
@@ -210,12 +243,74 @@ func editService(owner walk.Form, initial config.Service) (config.Service, bool)
 		dialog.Accept()
 	})
 
-	dialog.SetMinMaxSize(walk.Size{Width: 460, Height: 570}, walk.Size{})
-	dialog.SetSize(walk.Size{Width: 460, Height: 570})
+	dialog.SetMinMaxSize(walk.Size{Width: 500, Height: 420}, walk.Size{})
+	dialog.SetSize(walk.Size{Width: 500, Height: 500})
 	if dialog.Run() != int(walk.DlgCmdOK) {
 		return config.Service{}, false
 	}
 	return result, true
+}
+
+func newDialogSection(parent walk.Container) *walk.Composite {
+	section, _ := walk.NewComposite(parent)
+	layout := walk.NewVBoxLayout()
+	layout.SetMargins(walk.Margins{})
+	layout.SetSpacing(8)
+	_ = layout.SetAlignment(walk.AlignHNearVNear)
+	section.SetLayout(layout)
+	return section
+}
+
+func addDialogRow(parent walk.Container, labelText string) *walk.Composite {
+	row, _ := newDialogRow(parent, labelText)
+	return row
+}
+
+func newDialogRow(parent walk.Container, labelText string) (*walk.Composite, *walk.Label) {
+	row, _ := walk.NewComposite(parent)
+	layout := walk.NewHBoxLayout()
+	layout.SetMargins(walk.Margins{})
+	layout.SetSpacing(8)
+	row.SetLayout(layout)
+	label, _ := walk.NewLabel(row)
+	label.SetText(labelText)
+	label.SetMinMaxSize(walk.Size{Width: 110, Height: 0}, walk.Size{Width: 110, Height: 0})
+	return row, label
+}
+
+func addDialogLine(parent walk.Container, labelText, value string) *walk.LineEdit {
+	_, edit := addDialogLabeledLine(parent, labelText, value)
+	return edit
+}
+
+func addDialogLabeledLine(parent walk.Container, labelText, value string) (*walk.Label, *walk.LineEdit) {
+	row, label := newDialogRow(parent, labelText)
+	edit, _ := walk.NewLineEdit(row)
+	edit.SetText(value)
+	row.Layout().(*walk.BoxLayout).SetStretchFactor(edit, 1)
+	return label, edit
+}
+
+func addDialogCombo(parent walk.Container, labelText string, values []string) *walk.ComboBox {
+	row := addDialogRow(parent, labelText)
+	combo, _ := walk.NewDropDownBox(row)
+	_ = combo.SetModel(values)
+	row.Layout().(*walk.BoxLayout).SetStretchFactor(combo, 1)
+	return combo
+}
+
+func addDialogCheck(parent walk.Container, text string, checked bool) *walk.CheckBox {
+	check, _ := walk.NewCheckBox(parent)
+	check.SetText(text)
+	check.SetChecked(checked)
+	return check
+}
+
+func servicePort(service config.Service, fallback int) string {
+	if service.Port > 0 {
+		return strconv.Itoa(service.Port)
+	}
+	return strconv.Itoa(fallback)
 }
 
 func editSettings(owner walk.Form, tailscalePath string) (string, bool) {
@@ -261,35 +356,4 @@ func editSettings(owner walk.Form, tailscalePath string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(edit.Text()), true
-}
-
-func addLineRow(parent *walk.Composite, row int, labelText, value string) *walk.LineEdit {
-	grid := parent.Layout().(*walk.GridLayout)
-	label, _ := walk.NewLabel(parent)
-	label.SetText(labelText)
-	grid.SetRange(label, walk.Rectangle{X: 0, Y: row, Width: 1, Height: 1})
-	edit, _ := walk.NewLineEdit(parent)
-	edit.SetText(value)
-	grid.SetRange(edit, walk.Rectangle{X: 1, Y: row, Width: 1, Height: 1})
-	return edit
-}
-
-func addComboRow(parent *walk.Composite, row int, labelText string, values []string) *walk.ComboBox {
-	grid := parent.Layout().(*walk.GridLayout)
-	label, _ := walk.NewLabel(parent)
-	label.SetText(labelText)
-	grid.SetRange(label, walk.Rectangle{X: 0, Y: row, Width: 1, Height: 1})
-	combo, _ := walk.NewComboBox(parent)
-	_ = combo.SetModel(values)
-	grid.SetRange(combo, walk.Rectangle{X: 1, Y: row, Width: 1, Height: 1})
-	return combo
-}
-
-func addCheckRow(parent *walk.Composite, row int, text string, checked bool) *walk.CheckBox {
-	grid := parent.Layout().(*walk.GridLayout)
-	check, _ := walk.NewCheckBox(parent)
-	check.SetText(text)
-	check.SetChecked(checked)
-	grid.SetRange(check, walk.Rectangle{X: 1, Y: row, Width: 1, Height: 1})
-	return check
 }

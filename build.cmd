@@ -10,8 +10,12 @@ exit /b 1
 
 :go_found
 
-if not exist assets\portpilot.ico "%GO_EXE%" run .\cmd\makeicon
-if errorlevel 1 exit /b 1
+taskkill /F /IM PortPilot.exe >nul 2>nul
+
+if not exist assets\portpilot.ico (
+    "%GO_EXE%" run .\cmd\makeicon
+    if errorlevel 1 exit /b 1
+)
 
 "%GO_EXE%" run github.com/akavel/rsrc@v0.10.2 -arch amd64 -manifest assets\portpilot.exe.manifest -ico assets\portpilot.ico -o cmd\portpilot\rsrc_windows_amd64.syso
 if errorlevel 1 exit /b 1

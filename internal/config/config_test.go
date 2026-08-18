@@ -28,7 +28,7 @@ func TestSaveLoad(t *testing.T) {
 	if loaded.Services[0].ID == "" {
 		t.Fatal("expected generated service ID")
 	}
-	if loaded.Services[0].AccessMode != AccessAuto {
-		t.Fatalf("expected auto access mode, got %q", loaded.Services[0].AccessMode)
+	if loaded.Services[0].AccessMode != AccessTailscaleDirect {
+		t.Fatalf("expected migrated access mode, got %q", loaded.Services[0].AccessMode)
 	}
 }

@@ -24,6 +24,9 @@ func (m *serviceTableModel) Value(row, column int) any {
 	case 0:
 		return item.Service.Name
 	case 1:
+		if item.Service.Type == config.ServiceBridgeClient {
+			return "Remote Bridge"
+		}
 		if item.Service.Type == config.ServiceStatic {
 			return "静态文件"
 		}

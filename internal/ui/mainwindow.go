@@ -19,18 +19,30 @@ import (
 const WindowTitle = "PortPilot - 本地服务公网管理"
 
 type MainWindow struct {
-	baseDir  string
-	config   config.Config
-	manager  *manager.Manager
-	logger   *runlog.Logger
-	window   *walk.MainWindow
-	table    *walk.TableView
-	model    *serviceTableModel
-	status   *walk.Label
-	tray     *walk.NotifyIcon
-	icon     *walk.Icon
-	quitting atomic.Bool
-	unsub    func()
+	baseDir   string
+	config    config.Config
+	manager   *manager.Manager
+	logger    *runlog.Logger
+	window    *walk.MainWindow
+	table     *walk.TableView
+	tableMenu *walk.Menu
+	model     *serviceTableModel
+	status    *walk.Label
+	tray      *walk.NotifyIcon
+	icon      *walk.Icon
+	menu      serviceMenuActions
+	quitting  atomic.Bool
+	unsub     func()
+}
+
+type serviceMenuActions struct {
+	openAccess *walk.Action
+	copyAccess *walk.Action
+	start      *walk.Action
+	stop       *walk.Action
+	restart    *walk.Action
+	edit       *walk.Action
+	delete     *walk.Action
 }
 
 func NewMainWindow(baseDir string, cfg config.Config, serviceManager *manager.Manager, logger *runlog.Logger) (*MainWindow, error) {
@@ -40,6 +52,9 @@ func NewMainWindow(baseDir string, cfg config.Config, serviceManager *manager.Ma
 	}
 	ui := &MainWindow{baseDir: baseDir, config: cfg, manager: serviceManager, logger: logger, window: window, model: &serviceTableModel{}}
 	if err := ui.build(); err != nil {
+		if ui.tableMenu != nil {
+			ui.tableMenu.Dispose()
+		}
 		window.Dispose()
 		return nil, err
 	}
@@ -60,21 +75,8 @@ func (ui *MainWindow) build() error {
 	toolbarLayout.SetMargins(walk.Margins{})
 	toolbarLayout.SetSpacing(6)
 	toolbar.SetLayout(toolbarLayout)
-	ui.addButton(toolbar, "添加", ui.addService)
-	ui.addButton(toolbar, "编辑", ui.editSelected)
-	ui.addButton(toolbar, "删除", ui.deleteSelected)
-	ui.addButton(toolbar, "启动", func() { ui.runSelected("start") })
-	ui.addButton(toolbar, "停止", func() { ui.runSelected("stop") })
-	ui.addButton(toolbar, "重启", func() { ui.runSelected("restart") })
-	ui.addButton(toolbar, "启动全部", ui.startAll)
-	ui.addButton(toolbar, "停止全部", ui.stopAll)
+	ui.addButton(toolbar, "添加服务", ui.addService)
 	_, _ = walk.NewHSpacer(toolbar)
-	ui.addButton(toolbar, "打开本地", func() { ui.openSelected(false) })
-	ui.addButton(toolbar, "打开访问", func() { ui.openSelected(true) })
-	ui.addButton(toolbar, "复制本地", func() { ui.copySelected(false) })
-	ui.addButton(toolbar, "复制访问", func() { ui.copySelected(true) })
-	ui.addButton(toolbar, "日志", ui.openLog)
-	ui.addButton(toolbar, "设置", ui.settings)
 
 	table, err := walk.NewTableView(ui.window)
 	if err != nil {
@@ -85,7 +87,7 @@ func (ui *MainWindow) build() error {
 	for _, column := range []struct {
 		title string
 		width int
-	}{{"服务名称", 150}, {"类型", 130}, {"状态", 80}, {"本地地址", 230}, {"访问地址 / 配对码", 300}, {"Access Mode", 120}} {
+	}{{"服务名称", 150}, {"类型", 130}, {"状态", 80}, {"本地地址", 230}, {"访问地址", 300}, {"Access Mode", 120}} {
 		viewColumn := walk.NewTableViewColumn()
 		viewColumn.SetTitle(column.title)
 		viewColumn.SetWidth(column.width)
@@ -93,7 +95,14 @@ func (ui *MainWindow) build() error {
 			return err
 		}
 	}
-	table.ItemActivated().Attach(ui.editSelected)
+	tableMenu, err := walk.NewMenu()
+	if err != nil {
+		return err
+	}
+	ui.tableMenu = tableMenu
+	table.SetContextMenu(tableMenu)
+	ui.buildTableMenu()
+	table.ItemActivated().Attach(ui.activateSelected)
 	table.CurrentIndexChanged().Attach(ui.updateStatus)
 
 	status, _ := walk.NewLabel(ui.window)
@@ -138,6 +147,7 @@ func (ui *MainWindow) buildTray() error {
 	ui.addTrayAction("打开管理界面", ui.show)
 	ui.addTrayAction("启动全部服务", ui.startAll)
 	ui.addTrayAction("停止全部服务", ui.stopAll)
+	ui.addTrayAction("设置", ui.settings)
 	ui.addTrayAction("查看日志", ui.openLog)
 	separator := walk.NewSeparatorAction()
 	_ = tray.ContextMenu().Actions().Add(separator)
@@ -159,6 +169,9 @@ func (ui *MainWindow) Run() int {
 	if ui.tray != nil {
 		ui.tray.Dispose()
 	}
+	if ui.tableMenu != nil {
+		ui.tableMenu.Dispose()
+	}
 	if ui.icon != nil {
 		ui.icon.Dispose()
 	}
@@ -176,6 +189,28 @@ func (ui *MainWindow) addTrayAction(text string, handler func()) {
 	action.SetText(text)
 	action.Triggered().Attach(handler)
 	_ = ui.tray.ContextMenu().Actions().Add(action)
+}
+
+func (ui *MainWindow) addTableAction(text string, handler func()) *walk.Action {
+	action := walk.NewAction()
+	action.SetText(text)
+	action.Triggered().Attach(handler)
+	_ = ui.table.ContextMenu().Actions().Add(action)
+	return action
+}
+
+func (ui *MainWindow) buildTableMenu() {
+	ui.addTableAction("打开本地", func() { ui.openSelected(false) })
+	ui.menu.openAccess = ui.addTableAction("打开访问", func() { ui.openSelected(true) })
+	ui.addTableAction("复制本地", func() { ui.copySelected(false) })
+	ui.menu.copyAccess = ui.addTableAction("复制访问", func() { ui.copySelected(true) })
+	_ = ui.table.ContextMenu().Actions().Add(walk.NewSeparatorAction())
+	ui.menu.start = ui.addTableAction("启动", func() { ui.runSelected("start") })
+	ui.menu.stop = ui.addTableAction("停止", func() { ui.runSelected("stop") })
+	ui.menu.restart = ui.addTableAction("重启", func() { ui.runSelected("restart") })
+	_ = ui.table.ContextMenu().Actions().Add(walk.NewSeparatorAction())
+	ui.menu.edit = ui.addTableAction("编辑", ui.editSelected)
+	ui.menu.delete = ui.addTableAction("删除", ui.deleteSelected)
 }
 
 func (ui *MainWindow) show() {
@@ -206,6 +241,7 @@ func (ui *MainWindow) refresh() {
 
 func (ui *MainWindow) updateStatus() {
 	selected, ok := ui.selected()
+	ui.updateTableMenu(selected, ok)
 	if !ok {
 		ui.status.SetText(fmt.Sprintf("共 %d 个服务", len(ui.model.items)))
 		return
@@ -222,6 +258,27 @@ func (ui *MainWindow) updateStatus() {
 		text += " | " + selected.LastError
 	}
 	ui.status.SetText(text)
+}
+
+func (ui *MainWindow) updateTableMenu(selected manager.Snapshot, ok bool) {
+	if ui.menu.start == nil {
+		return
+	}
+	isBridgeServer := ok && selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient
+	isStopped := ok && selected.Status == manager.StatusStopped
+	isRunning := ok && !isStopped
+	_ = ui.menu.openAccess.SetVisible(ok && !isBridgeServer)
+	if isBridgeServer {
+		ui.menu.copyAccess.SetText("复制配对码")
+	} else {
+		ui.menu.copyAccess.SetText("复制访问")
+	}
+	_ = ui.menu.copyAccess.SetVisible(ok)
+	_ = ui.menu.start.SetVisible(isStopped)
+	_ = ui.menu.stop.SetVisible(isRunning)
+	_ = ui.menu.restart.SetVisible(isRunning)
+	_ = ui.menu.edit.SetVisible(isStopped)
+	_ = ui.menu.delete.SetVisible(isStopped)
 }
 
 func (ui *MainWindow) addService() {
@@ -254,6 +311,18 @@ func (ui *MainWindow) editSelected() {
 		}
 	}
 	ui.applyServices(services)
+}
+
+func (ui *MainWindow) activateSelected() {
+	selected, ok := ui.selected()
+	if !ok {
+		return
+	}
+	if selected.Status == manager.StatusRunning {
+		viewService(ui.window, selected.Service)
+		return
+	}
+	ui.editSelected()
 }
 
 func (ui *MainWindow) deleteSelected() {

@@ -164,8 +164,9 @@ func NormalizeService(service Service) Service {
 	if service.ID == "" {
 		service.ID = NewID()
 	}
-	if service.AccessMode == "" {
-		service.AccessMode = AccessAuto
+	if service.AccessMode == "" || service.AccessMode == AccessAuto {
+		// Auto was only a legacy UI convenience. Persist a concrete mode instead.
+		service.AccessMode = AccessTailscaleDirect
 	}
 	if service.Type == ServiceStatic {
 		service.LocalAddress = fmt.Sprintf("http://127.0.0.1:%d", service.Port)
