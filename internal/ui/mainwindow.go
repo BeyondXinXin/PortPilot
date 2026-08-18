@@ -319,6 +319,10 @@ func (ui *MainWindow) activateSelected() {
 	if !ok {
 		return
 	}
+	if selected.Status == manager.StatusStopped {
+		ui.editSelected()
+		return
+	}
 	isBridgeServer := selected.Service.AccessMode == config.AccessRemoteBridge && selected.Service.Type != config.ServiceBridgeClient
 	copyAccessLabel := "复制访问"
 	if isBridgeServer {
