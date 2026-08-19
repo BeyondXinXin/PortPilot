@@ -107,6 +107,7 @@ func (ui *MainWindow) build() error {
 	table.CurrentIndexChanged().Attach(ui.updateStatus)
 
 	status, _ := walk.NewLabel(ui.window)
+	_ = status.SetEllipsisMode(walk.EllipsisEnd)
 	status.SetText("就绪")
 	ui.status = status
 	ui.refresh()
@@ -300,10 +301,14 @@ func (ui *MainWindow) editSelected() {
 		walk.MsgBox(ui.window, "无法编辑", "请先停止服务。", walk.MsgBoxIconWarning)
 		return
 	}
-	service, accepted := editService(ui.window, selected.Service, ui.dialogActions(selected))
+	service, accepted, startAfterSave := editService(ui.window, selected.Service, ui.dialogActions(selected))
 	if !accepted {
 		return
 	}
+	ui.saveEditedService(service, startAfterSave)
+}
+
+func (ui *MainWindow) saveEditedService(service config.Service, startAfterSave bool) {
 	services := append([]config.Service{}, ui.config.Services...)
 	for index := range services {
 		if services[index].ID == service.ID {
@@ -311,7 +316,9 @@ func (ui *MainWindow) editSelected() {
 			break
 		}
 	}
-	ui.applyServices(services)
+	if ui.applyServices(services) && startAfterSave {
+		ui.runService(service.ID, "start", nil)
+	}
 }
 
 func (ui *MainWindow) activateSelected() {
@@ -323,7 +330,10 @@ func (ui *MainWindow) activateSelected() {
 		ui.editSelected()
 		return
 	}
-	viewService(ui.window, selected.Service, ui.dialogActions(selected))
+	service, accepted, startAfterSave := viewService(ui.window, selected.Service, ui.dialogActions(selected))
+	if accepted {
+		ui.saveEditedService(service, startAfterSave)
+	}
 }
 
 func (ui *MainWindow) dialogActions(selected manager.Snapshot) serviceDialogActions {
@@ -376,20 +386,21 @@ func (ui *MainWindow) deleteSelected() {
 	ui.applyServices(services)
 }
 
-func (ui *MainWindow) applyServices(services []config.Service) {
+func (ui *MainWindow) applyServices(services []config.Service) bool {
 	previous := ui.config.Services
 	if err := ui.manager.SetServices(services); err != nil {
 		walk.MsgBox(ui.window, "配置未保存", err.Error(), walk.MsgBoxIconError)
-		return
+		return false
 	}
 	ui.config.Services = services
 	if err := config.Save(ui.baseDir, ui.config); err != nil {
 		ui.config.Services = previous
 		_ = ui.manager.SetServices(previous)
 		walk.MsgBox(ui.window, "配置未保存", err.Error(), walk.MsgBoxIconError)
-		return
+		return false
 	}
 	ui.refresh()
+	return true
 }
 
 func (ui *MainWindow) runSelected(operation string) {
@@ -401,19 +412,23 @@ func (ui *MainWindow) runSelectedWithCallback(operation string, completed func(e
 	if !ok {
 		return
 	}
+	ui.runService(selected.Service.ID, operation, completed)
+}
+
+func (ui *MainWindow) runService(serviceID, operation string, completed func(error)) {
 	ui.status.SetText("正在执行，请稍候...")
 	go func() {
 		var err error
 		switch operation {
 		case "stop":
-			err = ui.manager.Stop(selected.Service.ID)
+			err = ui.manager.Stop(serviceID)
 		case "restart":
-			err = ui.manager.Restart(selected.Service.ID)
+			err = ui.manager.Restart(serviceID)
 		default:
-			err = ui.manager.Start(selected.Service.ID)
+			err = ui.manager.Start(serviceID)
 		}
 		ui.window.Synchronize(func() {
-			ui.handleOperationError(selected.Service.ID, operation, err)
+			ui.handleOperationError(serviceID, operation, err)
 			if completed != nil {
 				completed(err)
 			}

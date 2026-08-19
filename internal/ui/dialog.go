@@ -11,10 +11,11 @@ import (
 )
 
 func newService(owner walk.Form, initial config.Service) (config.Service, bool) {
-	return serviceDialog(owner, initial, false, serviceDialogActions{})
+	service, accepted, _ := serviceDialog(owner, initial, false, serviceDialogActions{})
+	return service, accepted
 }
 
-func editService(owner walk.Form, initial config.Service, actions serviceDialogActions) (config.Service, bool) {
+func editService(owner walk.Form, initial config.Service, actions serviceDialogActions) (config.Service, bool, bool) {
 	return serviceDialog(owner, initial, false, actions)
 }
 
@@ -30,14 +31,14 @@ type serviceDialogActions struct {
 	serviceActionNext      func(func(error))
 }
 
-func viewService(owner walk.Form, initial config.Service, actions serviceDialogActions) {
-	_, _ = serviceDialog(owner, initial, true, actions)
+func viewService(owner walk.Form, initial config.Service, actions serviceDialogActions) (config.Service, bool, bool) {
+	return serviceDialog(owner, initial, true, actions)
 }
 
-func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actions serviceDialogActions) (config.Service, bool) {
+func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actions serviceDialogActions) (config.Service, bool, bool) {
 	dialog, err := walk.NewDialog(owner)
 	if err != nil {
-		return config.Service{}, false
+		return config.Service{}, false, false
 	}
 	defer dialog.Dispose()
 	if readOnly {
@@ -172,6 +173,7 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 		nextAction := actions.serviceActionNext
 		currentLabel := actions.serviceActionLabel
 		nextLabel := actions.serviceActionNextLabel
+		running := actions.serviceActionLabel == "停止"
 		serviceActionButton = addServiceDialogAction(buttons, actions.serviceActionLabel, func() {
 			serviceActionButton.SetEnabled(false)
 			currentAction(func(operationErr error) {
@@ -181,9 +183,10 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 				}
 				currentAction, nextAction = nextAction, currentAction
 				currentLabel, nextLabel = nextLabel, currentLabel
+				running = !running
 				serviceActionButton.SetText(currentLabel)
-				setReadOnly(currentLabel == "停止")
-				setAccessActionsVisible(currentLabel == "停止")
+				setReadOnly(running)
+				setAccessActionsVisible(running)
 			})
 		})
 	}
@@ -191,9 +194,16 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 	_ = spacer
 	saveButton, _ := walk.NewPushButton(buttons)
 	saveButton.SetText("保存")
+	saveAndStartButton, _ := walk.NewPushButton(buttons)
+	saveAndStartButton.SetText("保存并启动")
 	cancelButton, _ := walk.NewPushButton(buttons)
 	cancelButton.Clicked().Attach(dialog.Cancel)
 	setReadOnly = func(value bool) {
+		if value {
+			dialog.SetTitle("服务配置（运行中，只读）")
+		} else {
+			dialog.SetTitle("服务配置")
+		}
 		typeCombo.SetEnabled(!value)
 		nameEdit.SetReadOnly(value)
 		directoryEdit.SetReadOnly(value)
@@ -211,7 +221,11 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 		tailscaleServeAccess.SetEnabled(!value)
 		funnelAccess.SetEnabled(!value)
 		bridgeAccess.SetEnabled(!value)
+		if serviceActionButton != nil {
+			serviceActionButton.SetVisible(value)
+		}
 		saveButton.SetVisible(!value)
+		saveAndStartButton.SetVisible(!value && actions.serviceAction != nil)
 		if value {
 			cancelButton.SetText("关闭")
 		} else {
@@ -222,7 +236,8 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 	setAccessActionsVisible(actions.accessActionsVisible)
 
 	result := initial
-	saveButton.Clicked().Attach(func() {
+	startAfterSave := false
+	save := func() {
 		serviceType := config.ServiceBridgeClient
 		portText := bridgePort.Text()
 		if typeCombo.CurrentIndex() == 1 {
@@ -295,14 +310,22 @@ func serviceDialog(owner walk.Form, initial config.Service, readOnly bool, actio
 			return
 		}
 		dialog.Accept()
+	}
+	saveButton.Clicked().Attach(func() {
+		startAfterSave = false
+		save()
+	})
+	saveAndStartButton.Clicked().Attach(func() {
+		startAfterSave = true
+		save()
 	})
 
 	dialog.SetMinMaxSize(walk.Size{Width: 500, Height: 420}, walk.Size{})
 	dialog.SetSize(walk.Size{Width: 500, Height: 500})
 	if dialog.Run() != int(walk.DlgCmdOK) {
-		return config.Service{}, false
+		return config.Service{}, false, false
 	}
-	return result, true
+	return result, true, startAfterSave
 }
 
 func newDialogSection(parent walk.Container) *walk.Composite {
